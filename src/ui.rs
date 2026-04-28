@@ -8,9 +8,14 @@ use ratatui::{
 use crate::app::{App, Mode};
 use crate::agent::{Agent, AgentStatus};
 
-const ACCENT: Color = Color::Indexed(208);
-const DIM: Color = Color::DarkGray;
-const TEXT: Color = Color::White;
+// Strategic palette — every color carries one meaning, and we lean on the
+// terminal's own theme rather than overriding it. No backgrounds anywhere.
+const TEXT: Color = Color::Reset;     // primary content; honors terminal fg
+const DIM: Color = Color::DarkGray;   // metadata, labels, separators, hints
+const FOCUS: Color = Color::Cyan;     // selection / focused field / modal accent
+const READY: Color = Color::Green;    // ✓ — session alive and quiet
+const BUSY: Color = Color::Yellow;    // spinner + slug → branch drift (in-flight / unsettled)
+const FAIL: Color = Color::Red;       // error glyph
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
 const AGENT_VISIBLE_ROWS: usize = (AGENT_TABLE_HEIGHT as usize) - 2;
@@ -77,15 +82,19 @@ const SPINNER_FRAMES: [&str; 10] = [
     "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}",
 ];
 
-fn status_glyph(agent: &Agent, frame_idx: usize, base: Style) -> Span<'static> {
+fn status_glyph(agent: &Agent, frame_idx: usize, _base: Style) -> Span<'static> {
+    // The status glyph carries its own semantics — yellow spinner = working,
+    // green ✓ = quiet/done, red ✗ = failed, dim − = stopped. The spinner→✓
+    // transition is a color change as well as a glyph change so the moment
+    // an agent finishes pops in peripheral vision.
     match &agent.status {
-        AgentStatus::Error(_) => Span::styled("\u{2717}", Style::default().fg(Color::Red)),
+        AgentStatus::Error(_) => Span::styled("\u{2717}", Style::default().fg(FAIL)),
         AgentStatus::Stopped => Span::styled("\u{2212}", Style::default().fg(DIM)),
         _ if agent.shows_spinner() => {
             let g = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
-            Span::styled(g, base)
+            Span::styled(g, Style::default().fg(BUSY))
         }
-        _ => Span::styled("\u{2713}", base),
+        _ => Span::styled("\u{2713}", Style::default().fg(READY)),
     }
 }
 
@@ -100,7 +109,7 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Line::from(vec![
                 Span::styled("No agents running. Press ", Style::default().fg(DIM)),
-                Span::styled("n", Style::default().fg(ACCENT)),
+                Span::styled("n", Style::default().fg(FOCUS)),
                 Span::styled(" to create one.", Style::default().fg(DIM)),
             ])
         };
@@ -146,13 +155,13 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
 
         let indicator = if is_selected { "\u{2502}" } else { " " };
         let indicator_style = if is_selected {
-            Style::default().fg(ACCENT)
+            Style::default().fg(FOCUS)
         } else {
             Style::default()
         };
 
         let text_style = if is_selected {
-            Style::default().fg(ACCENT)
+            Style::default().fg(FOCUS)
         } else {
             Style::default().fg(DIM)
         };
@@ -166,7 +175,7 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
         let branch_cell = if drifted {
             Line::from(vec![
                 Span::styled(agent.slug.as_str(), text_style),
-                Span::styled(" \u{2192} ", Style::default().fg(DIM)),
+                Span::styled(" \u{2192} ", Style::default().fg(BUSY)),
                 Span::styled(agent.branch.as_str(), text_style.add_modifier(Modifier::ITALIC)),
             ])
         } else {
@@ -182,7 +191,7 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    let hdr_style = Style::default().fg(DIM).add_modifier(Modifier::BOLD);
+    let hdr_style = Style::default().fg(DIM);
     let header = Row::new(vec![
         Cell::from(""),
         Cell::from(""),
@@ -213,13 +222,13 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
 
     let label_spans = if let Some(agent) = app.selected_agent() {
         let dim_style = Style::default().fg(DIM);
-        let accent_style = Style::default().fg(ACCENT);
+        let accent_style = Style::default().fg(FOCUS);
 
         let drifted = agent.slug != agent.branch.replace('/', "-");
         let mut spans = vec![Span::styled(" ", dim_style)];
         if drifted {
             spans.push(Span::styled(agent.slug.as_str(), accent_style));
-            spans.push(Span::styled(" \u{2192} ", dim_style));
+            spans.push(Span::styled(" \u{2192} ", Style::default().fg(BUSY)));
             spans.push(Span::styled(
                 agent.branch.as_str(),
                 accent_style.add_modifier(Modifier::ITALIC),
@@ -345,7 +354,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(DIM))
-        .title(Span::styled(" New Agent ", Style::default().fg(ACCENT)));
+        .title(Span::styled(" New Agent ", Style::default().fg(FOCUS)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -389,10 +398,10 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     let label_w = 14u16;
     let label_style = |focused: bool| {
-        if focused { Style::default().fg(ACCENT) } else { Style::default().fg(DIM) }
+        if focused { Style::default().fg(FOCUS) } else { Style::default().fg(DIM) }
     };
     let val_style = |focused: bool| {
-        if focused { Style::default().fg(ACCENT) } else { Style::default().fg(TEXT) }
+        if focused { Style::default().fg(FOCUS) } else { Style::default().fg(TEXT) }
     };
 
     // --- Agent row ---
@@ -401,9 +410,9 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     let agent_line = Line::from(vec![
         Span::styled("  Agent", label_style(is_agent)),
         Span::raw(" ".repeat((label_w as usize).saturating_sub(7))),
-        Span::styled("\u{2039} ", Style::default().fg(if is_agent { ACCENT } else { DIM })),
+        Span::styled("\u{2039} ", Style::default().fg(if is_agent { FOCUS } else { DIM })),
         Span::styled(kind_label, val_style(is_agent)),
-        Span::styled(" \u{203a}", Style::default().fg(if is_agent { ACCENT } else { DIM })),
+        Span::styled(" \u{203a}", Style::default().fg(if is_agent { FOCUS } else { DIM })),
     ]);
     frame.render_widget(Paragraph::new(agent_line), chunks[1]);
 
@@ -413,9 +422,9 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     let repo_line = Line::from(vec![
         Span::styled("  Repo", label_style(is_repo)),
         Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
-        Span::styled(repo_arrows.0, Style::default().fg(if is_repo { ACCENT } else { DIM })),
+        Span::styled(repo_arrows.0, Style::default().fg(if is_repo { FOCUS } else { DIM })),
         Span::styled(repo_name, val_style(is_repo)),
-        Span::styled(repo_arrows.1, Style::default().fg(if is_repo { ACCENT } else { DIM })),
+        Span::styled(repo_arrows.1, Style::default().fg(if is_repo { FOCUS } else { DIM })),
     ]);
     frame.render_widget(Paragraph::new(repo_line), chunks[3]);
 
@@ -428,9 +437,9 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     let toggle_line = Line::from(vec![
         Span::styled("  Branch", label_style(is_toggle)),
         Span::raw(" ".repeat((label_w as usize).saturating_sub(8))),
-        Span::styled("\u{2039} ", Style::default().fg(if is_toggle { ACCENT } else { DIM })),
+        Span::styled("\u{2039} ", Style::default().fg(if is_toggle { FOCUS } else { DIM })),
         Span::styled(mode_label, val_style(is_toggle)),
-        Span::styled(" \u{203a}", Style::default().fg(if is_toggle { ACCENT } else { DIM })),
+        Span::styled(" \u{203a}", Style::default().fg(if is_toggle { FOCUS } else { DIM })),
     ]);
     frame.render_widget(Paragraph::new(toggle_line), chunks[5]);
 
@@ -462,7 +471,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
                 let selected = i == *base_index;
                 let indicator = if selected { "\u{2502} " } else { "  " };
                 let style = if selected && is_list {
-                    Style::default().fg(ACCENT)
+                    Style::default().fg(FOCUS)
                 } else if selected {
                     Style::default().fg(TEXT)
                 } else {
@@ -482,7 +491,12 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     if show_name {
         let is_name = matches!(focus, NewAgentFocus::Name);
         let name_display = if is_name && *name_pristine {
-            Span::styled(branch_name.as_str(), Style::default().fg(Color::Black).bg(ACCENT))
+            // Pristine auto-suggested name: dim + italic so it reads as a
+            // placeholder that will be replaced the moment the user types.
+            Span::styled(
+                branch_name.as_str(),
+                Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+            )
         } else {
             let cursor = if is_name { "_" } else { "" };
             Span::styled(format!("{branch_name}{cursor}"), val_style(is_name))
@@ -506,7 +520,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         let placeholder = if is_prompt {
             Line::from(vec![
                 Span::raw(" ".repeat(label_w as usize)),
-                Span::styled("_", Style::default().fg(ACCENT)),
+                Span::styled("_", Style::default().fg(FOCUS)),
             ])
         } else {
             Line::from(vec![
@@ -524,7 +538,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
             .sum();
         let scroll = line_count.saturating_sub(prompt_area.height);
         let paragraph = Paragraph::new(text)
-            .style(Style::default().fg(if is_prompt { ACCENT } else { TEXT }))
+            .style(Style::default().fg(if is_prompt { FOCUS } else { TEXT }))
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0));
         frame.render_widget(paragraph, prompt_area);
@@ -556,7 +570,7 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(DIM))
-        .title(Span::styled(" Delete Agent ", Style::default().fg(ACCENT)));
+        .title(Span::styled(" Delete Agent ", Style::default().fg(FOCUS)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -582,7 +596,7 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     ));
     let msg2 = Line::from(vec![
         Span::styled("  ", Style::default().fg(TEXT)),
-        Span::styled(name, Style::default().fg(ACCENT)),
+        Span::styled(name, Style::default().fg(FOCUS)),
         Span::styled("?", Style::default().fg(TEXT)),
     ]);
     let msg3 = if has_session {
@@ -603,19 +617,19 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     let hint = if has_session {
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled("y", Style::default().fg(ACCENT)),
+            Span::styled("y", Style::default().fg(FOCUS)),
             Span::styled(" delete + tmux  ", Style::default().fg(DIM)),
-            Span::styled("p", Style::default().fg(ACCENT)),
+            Span::styled("p", Style::default().fg(FOCUS)),
             Span::styled(" preserve tmux  ", Style::default().fg(DIM)),
-            Span::styled("esc", Style::default().fg(ACCENT)),
+            Span::styled("esc", Style::default().fg(FOCUS)),
             Span::styled(" cancel", Style::default().fg(DIM)),
         ])
     } else {
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled("y", Style::default().fg(ACCENT)),
+            Span::styled("y", Style::default().fg(FOCUS)),
             Span::styled(" confirm  ", Style::default().fg(DIM)),
-            Span::styled("esc", Style::default().fg(ACCENT)),
+            Span::styled("esc", Style::default().fg(FOCUS)),
             Span::styled(" cancel", Style::default().fg(DIM)),
         ])
     };
