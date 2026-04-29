@@ -2917,4 +2917,14 @@ mod tests {
         let action = app.handle_key(make_key(KeyCode::Char('q')));
         assert!(matches!(action, Some(Action::TypeChar('q'))));
     }
+
+    #[test]
+    fn newagent_name_q_still_types() {
+        let mut app = test_app_in_new_agent_mode();
+        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+            *focus = NewAgentFocus::Name;
+        }
+        let action = app.handle_key(make_key(KeyCode::Char('q')));
+        assert!(matches!(action, Some(Action::TypeChar('q'))));
+    }
 }
