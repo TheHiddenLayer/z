@@ -94,18 +94,12 @@ fn status_glyph(agent: &Agent, frame_idx: usize, _base: Style) -> Span<'static> 
 fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
     if app.agents.is_empty() {
         let repos = app.config.resolved_repos();
-        let line = if repos.is_empty() {
-            Line::from(Span::styled(
-                "No repos configured. Add repos to ~/.config/z/config.toml",
-                Style::default().fg(DIM),
-            ))
+        let msg = if repos.is_empty() {
+            "No repos configured. Add repos to ~/.config/z/config.toml"
         } else {
-            Line::from(vec![
-                Span::styled("No agents running. Press ", Style::default().fg(DIM)),
-                Span::styled("n", Style::default().fg(ACCENT)),
-                Span::styled(" to create one.", Style::default().fg(DIM)),
-            ])
+            "No agents yet."
         };
+        let line = Line::from(Span::styled(msg, Style::default().fg(DIM)));
         frame.render_widget(Paragraph::new(line), area);
         return;
     }
