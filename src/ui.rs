@@ -254,18 +254,18 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
             let left_dashes = 3;
             let right_dashes = 3;
             let middle_dashes = w
-                .saturating_sub(left_dashes + label_len + pos_len + right_dashes);
+                .saturating_sub(left_dashes + pos_len + label_len + right_dashes);
             let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
-            spans.extend(label);
-            spans.push(Span::styled("\u{2500}".repeat(middle_dashes), dash_style));
             spans.extend(pos);
+            spans.push(Span::styled("\u{2500}".repeat(middle_dashes), dash_style));
+            spans.extend(label);
             spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
             Line::from(spans)
         }
         (Some(label), None) => {
             let label_len: usize = label.iter().map(|s| s.width()).sum();
-            let left_dashes = 3;
-            let right_dashes = w.saturating_sub(left_dashes + label_len);
+            let right_dashes = 3;
+            let left_dashes = w.saturating_sub(label_len + right_dashes);
             let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
             spans.extend(label);
             spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
@@ -273,8 +273,8 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
         }
         (None, Some(pos)) => {
             let pos_len: usize = pos.iter().map(|s| s.width()).sum();
-            let right_dashes = 3;
-            let left_dashes = w.saturating_sub(pos_len + right_dashes);
+            let left_dashes = 3;
+            let right_dashes = w.saturating_sub(left_dashes + pos_len);
             let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
             spans.extend(pos);
             spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
