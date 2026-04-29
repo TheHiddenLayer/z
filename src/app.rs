@@ -41,6 +41,7 @@ pub enum Action {
     StartNewAgent,
     StartDelete,
     CancelMode,
+    ToggleHelp,
 
     // New agent flow
     PickerNext,
@@ -188,6 +189,7 @@ pub struct App {
     pub preview_content: Option<String>,
     pub spinner_frame: usize,
     pub dirty: bool,
+    pub help_visible: bool,
 
     // Backpressure: prevent spawning new work when previous is in-flight
     discover_pending: bool,
@@ -208,6 +210,7 @@ impl App {
             preview_content: None,
             spinner_frame: 0,
             dirty: true, // render on first frame
+            help_visible: false,
             discover_pending: false,
             focused: true,
         }
@@ -329,6 +332,9 @@ impl App {
             }
             Action::CancelMode => {
                 self.mode = Mode::Normal;
+            }
+            Action::ToggleHelp => {
+                self.help_visible = !self.help_visible;
             }
 
             // --- Pickers ---
@@ -892,6 +898,7 @@ impl App {
                         .map(|a| Action::KillSession(a.session_name.clone()))
                 }
                 KeyCode::Char('d') => Some(Action::StartDelete),
+                KeyCode::Char('?') => Some(Action::ToggleHelp),
                 _ => None,
             },
             Mode::ConfirmDelete => match key.code {
@@ -1505,6 +1512,19 @@ mod tests {
 
     fn make_key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn question_mark_toggles_help_in_normal_mode() {
+        let mut app = test_app();
+        assert!(!app.help_visible);
+        let action = app.handle_key(make_key(KeyCode::Char('?'))).unwrap();
+        assert!(matches!(action, Action::ToggleHelp));
+        app.update(action);
+        assert!(app.help_visible);
+        let action = app.handle_key(make_key(KeyCode::Char('?'))).unwrap();
+        app.update(action);
+        assert!(!app.help_visible);
     }
 
     #[test]

@@ -310,7 +310,7 @@ fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let line = if let Some(msg) = &app.status_message {
         Line::from(Span::styled(msg.as_str(), Style::default().fg(DIM)))
-    } else {
+    } else if app.help_visible {
         footer_hint(&[
             ("↑/k", "up"),
             ("↓/j", "down"),
@@ -318,8 +318,11 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             ("a", "attach"),
             ("x", "stop"),
             ("d", "delete"),
+            ("?", "hide"),
             ("q", "quit"),
         ])
+    } else {
+        Line::from(Span::styled("?", Style::default().fg(DIM)))
     };
     frame.render_widget(Paragraph::new(line), area);
 }
