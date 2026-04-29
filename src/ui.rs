@@ -379,12 +379,14 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     let label_style = |focused: bool| {
         if focused { Style::default().fg(TEXT) } else { Style::default().fg(DIM) }
     };
-    let val_style = |_focused: bool| Style::default().fg(TEXT);
+    let val_style = |focused: bool| {
+        if focused { Style::default().fg(TEXT) } else { Style::default().fg(DIM) }
+    };
 
     // Picker row: "│ Label    value" when focused, "  Label    value" when not.
-    // Selection is encoded by the left bar plus brightness contrast on the
-    // label (TEXT focused, DIM unfocused). Value text stays TEXT regardless —
-    // it's content, not a focus indicator.
+    // Selection is encoded by the left bar plus whole-row brightness contrast —
+    // focused rows TEXT, unfocused rows DIM — matching the agent table's
+    // convention. Without it the focus signal is too subtle in a vertical stack.
     let picker_row = |label: &str, value: &str, focused: bool| -> Line<'static> {
         let indicator = if focused { "\u{2502} " } else { "  " };
         let indicator_style = if focused {
@@ -392,12 +394,13 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default()
         };
-        let label_style = if focused {
+        let row_style = if focused {
             Style::default().fg(TEXT)
         } else {
             Style::default().fg(DIM)
         };
-        let value_style = Style::default().fg(TEXT);
+        let label_style = row_style;
+        let value_style = row_style;
         let label_field_w = label_w as usize;
         // Label occupies the label column; value starts at column label_w + 2.
         let label_padding = label_field_w.saturating_sub(label.len() + 2);
