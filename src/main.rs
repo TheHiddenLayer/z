@@ -2,6 +2,7 @@ mod config;
 mod agent;
 mod app;
 mod notifications;
+mod style;
 mod ui;
 
 use std::time::Duration;

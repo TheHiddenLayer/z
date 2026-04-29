@@ -896,6 +896,7 @@ impl App {
             },
             Mode::ConfirmDelete => match key.code {
                 KeyCode::Esc => Some(Action::CancelMode),
+                KeyCode::Char('q') => Some(Action::CancelMode),
                 KeyCode::Char('y') => Some(Action::DeleteAll { preserve_tmux: false }),
                 KeyCode::Char('p') => Some(Action::DeleteAll { preserve_tmux: true }),
                 _ => None,
@@ -925,9 +926,18 @@ impl App {
                 KeyCode::Down if matches!(focus, NewAgentFocus::BranchList) => {
                     Some(Action::PickerNext)
                 }
+                KeyCode::Char('k') if matches!(focus, NewAgentFocus::BranchList) => {
+                    Some(Action::PickerPrev)
+                }
+                KeyCode::Char('j') if matches!(focus, NewAgentFocus::BranchList) => {
+                    Some(Action::PickerNext)
+                }
                 // Text fields: Name, Prompt
                 KeyCode::Backspace if matches!(focus, NewAgentFocus::Prompt | NewAgentFocus::Name) => {
                     Some(Action::TypeBackspace)
+                }
+                KeyCode::Char('q') if !matches!(focus, NewAgentFocus::Prompt | NewAgentFocus::Name) => {
+                    Some(Action::CancelMode)
                 }
                 KeyCode::Char(c) if matches!(focus, NewAgentFocus::Prompt | NewAgentFocus::Name) => {
                     Some(Action::TypeChar(c))
@@ -2853,5 +2863,68 @@ mod tests {
 
         // New status (Running) wins.
         assert!(matches!(app.agents[0].status, AgentStatus::Running));
+    }
+
+    #[test]
+    fn newagent_branchlist_k_moves_up() {
+        let mut app = test_app_in_new_agent_mode();
+        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+            *focus = NewAgentFocus::BranchList;
+        }
+        let action = app.handle_key(make_key(KeyCode::Char('k')));
+        assert!(matches!(action, Some(Action::PickerPrev)));
+    }
+
+    #[test]
+    fn newagent_branchlist_j_moves_down() {
+        let mut app = test_app_in_new_agent_mode();
+        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+            *focus = NewAgentFocus::BranchList;
+        }
+        let action = app.handle_key(make_key(KeyCode::Char('j')));
+        assert!(matches!(action, Some(Action::PickerNext)));
+    }
+
+    #[test]
+    fn newagent_prompt_j_still_types() {
+        let app = test_app_in_new_agent_mode();
+        let action = app.handle_key(make_key(KeyCode::Char('j')));
+        assert!(matches!(action, Some(Action::TypeChar('j'))));
+    }
+
+    #[test]
+    fn confirmdelete_q_cancels() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("a")];
+        app.update(Action::StartDelete);
+        let action = app.handle_key(make_key(KeyCode::Char('q')));
+        assert!(matches!(action, Some(Action::CancelMode)));
+    }
+
+    #[test]
+    fn newagent_branchlist_q_cancels() {
+        let mut app = test_app_in_new_agent_mode();
+        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+            *focus = NewAgentFocus::BranchList;
+        }
+        let action = app.handle_key(make_key(KeyCode::Char('q')));
+        assert!(matches!(action, Some(Action::CancelMode)));
+    }
+
+    #[test]
+    fn newagent_prompt_q_still_types() {
+        let app = test_app_in_new_agent_mode();
+        let action = app.handle_key(make_key(KeyCode::Char('q')));
+        assert!(matches!(action, Some(Action::TypeChar('q'))));
+    }
+
+    #[test]
+    fn newagent_name_q_still_types() {
+        let mut app = test_app_in_new_agent_mode();
+        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+            *focus = NewAgentFocus::Name;
+        }
+        let action = app.handle_key(make_key(KeyCode::Char('q')));
+        assert!(matches!(action, Some(Action::TypeChar('q'))));
     }
 }

@@ -1,21 +1,14 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
 };
 use crate::app::{App, Mode};
 use crate::agent::{Agent, AgentStatus};
 
-// Strategic palette — every color carries one meaning, and we lean on the
-// terminal's own theme rather than overriding it. No backgrounds anywhere.
-const TEXT: Color = Color::Reset;     // primary content; honors terminal fg
-const DIM: Color = Color::DarkGray;   // metadata, labels, separators, hints
-const FOCUS: Color = Color::Cyan;     // selection / focused field / modal accent
-const READY: Color = Color::Green;    // ✓ — session alive and quiet
-const BUSY: Color = Color::Yellow;    // spinner + slug → branch drift (in-flight / unsettled)
-const FAIL: Color = Color::Red;       // error glyph
+use crate::style::{ACCENT, DIM, TEXT, drift_arrow, footer_hint, modal_title, status_color};
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
 
@@ -81,15 +74,6 @@ const SPINNER_FRAMES: [&str; 10] = [
     "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}",
 ];
 
-fn status_color(agent: &Agent) -> Color {
-    match &agent.status {
-        AgentStatus::Error(_) => FAIL,
-        AgentStatus::Stopped => DIM,
-        _ if agent.shows_spinner() => BUSY,
-        _ => READY,
-    }
-}
-
 fn status_glyph(agent: &Agent, frame_idx: usize, _base: Style) -> Span<'static> {
     // The status glyph carries its own semantics — yellow spinner = working,
     // green ✓ = quiet/done, red ✗ = failed, dim − = stopped. The spinner→✓
@@ -110,18 +94,12 @@ fn status_glyph(agent: &Agent, frame_idx: usize, _base: Style) -> Span<'static> 
 fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
     if app.agents.is_empty() {
         let repos = app.config.resolved_repos();
-        let line = if repos.is_empty() {
-            Line::from(Span::styled(
-                "No repos configured. Add repos to ~/.config/z/config.toml",
-                Style::default().fg(DIM),
-            ))
+        let msg = if repos.is_empty() {
+            "No repos configured. Add repos to ~/.config/z/config.toml"
         } else {
-            Line::from(vec![
-                Span::styled("No agents running. Press ", Style::default().fg(DIM)),
-                Span::styled("n", Style::default().fg(FOCUS)),
-                Span::styled(" to create one.", Style::default().fg(DIM)),
-            ])
+            "No agents yet."
         };
+        let line = Line::from(Span::styled(msg, Style::default().fg(DIM)));
         frame.render_widget(Paragraph::new(line), area);
         return;
     }
@@ -164,13 +142,13 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
 
         let indicator = if is_selected { "\u{2502}" } else { " " };
         let indicator_style = if is_selected {
-            Style::default().fg(FOCUS)
+            Style::default().fg(ACCENT)
         } else {
             Style::default()
         };
 
         let text_style = if is_selected {
-            Style::default().fg(FOCUS)
+            Style::default().fg(ACCENT)
         } else {
             Style::default().fg(DIM)
         };
@@ -184,7 +162,7 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
         let branch_cell = if drifted {
             Line::from(vec![
                 Span::styled(agent.slug.as_str(), text_style),
-                Span::styled(" \u{2192} ", Style::default().fg(BUSY)),
+                drift_arrow(),
                 Span::styled(agent.branch.as_str(), text_style.add_modifier(Modifier::ITALIC)),
             ])
         } else {
@@ -231,13 +209,13 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
 
     let label_spans = if let Some(agent) = app.selected_agent() {
         let dim_style = Style::default().fg(DIM);
-        let accent_style = Style::default().fg(FOCUS);
+        let accent_style = Style::default().fg(ACCENT);
 
         let drifted = agent.slug != agent.branch.replace('/', "-");
         let mut spans = vec![Span::styled(" ", dim_style)];
         if drifted {
             spans.push(Span::styled(agent.slug.as_str(), accent_style));
-            spans.push(Span::styled(" \u{2192} ", Style::default().fg(BUSY)));
+            spans.push(drift_arrow());
             spans.push(Span::styled(
                 agent.branch.as_str(),
                 accent_style.add_modifier(Modifier::ITALIC),
@@ -333,28 +311,17 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let line = if let Some(msg) = &app.status_message {
         Line::from(Span::styled(msg.as_str(), Style::default().fg(DIM)))
     } else {
-        let key_style = Style::default().fg(TEXT).add_modifier(Modifier::BOLD);
-        let label_style = Style::default().fg(DIM);
-        Line::from(vec![
-            Span::styled("n", key_style),
-            Span::styled(" new", label_style),
-            Span::styled(" \u{00b7} ", label_style),
-            Span::styled("a", key_style),
-            Span::styled(" attach", label_style),
-            Span::styled(" \u{00b7} ", label_style),
-            Span::styled("x", key_style),
-            Span::styled(" stop", label_style),
-            Span::styled(" \u{00b7} ", label_style),
-            Span::styled("d", key_style),
-            Span::styled(" delete", label_style),
-            Span::styled(" \u{00b7} ", label_style),
-            Span::styled("q", key_style),
-            Span::styled(" quit", label_style),
+        footer_hint(&[
+            ("↑/k", "up"),
+            ("↓/j", "down"),
+            ("n", "new"),
+            ("a", "attach"),
+            ("x", "stop"),
+            ("d", "delete"),
+            ("q", "quit"),
         ])
     };
-
-    let bar = Paragraph::new(line);
-    frame.render_widget(bar, area);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
@@ -363,7 +330,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(DIM))
-        .title(Span::styled(" New Agent ", Style::default().fg(FOCUS)));
+        .title(modal_title("New Agent"));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -407,34 +374,51 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     let label_w = 14u16;
     let label_style = |focused: bool| {
-        if focused { Style::default().fg(FOCUS) } else { Style::default().fg(DIM) }
+        if focused { Style::default().fg(ACCENT) } else { Style::default().fg(DIM) }
     };
     let val_style = |focused: bool| {
-        if focused { Style::default().fg(FOCUS) } else { Style::default().fg(TEXT) }
+        if focused { Style::default().fg(ACCENT) } else { Style::default().fg(TEXT) }
+    };
+
+    // Picker row: "│ Label    value" when focused, "  Label    value" when not.
+    // Replaces the old "‹ value ›" arrow chrome — selection is now expressed
+    // by the left bar + ACCENT, the same way every other list in z does it.
+    let picker_row = |label: &str, value: &str, focused: bool| -> Line<'static> {
+        let indicator = if focused { "\u{2502} " } else { "  " };
+        let indicator_style = if focused {
+            Style::default().fg(ACCENT)
+        } else {
+            Style::default()
+        };
+        let label_style = if focused {
+            Style::default().fg(ACCENT)
+        } else {
+            Style::default().fg(DIM)
+        };
+        let value_style = if focused {
+            Style::default().fg(ACCENT)
+        } else {
+            Style::default().fg(TEXT)
+        };
+        let label_field_w = label_w as usize;
+        // Label occupies the label column; value starts at column label_w + 2.
+        let label_padding = label_field_w.saturating_sub(label.len() + 2);
+        Line::from(vec![
+            Span::styled(indicator.to_string(), indicator_style),
+            Span::styled(label.to_string(), label_style),
+            Span::raw(" ".repeat(label_padding)),
+            Span::styled(value.to_string(), value_style),
+        ])
     };
 
     // --- Agent row ---
     let is_agent = matches!(focus, NewAgentFocus::Agent);
-    let kind_label = agent_name.as_str();
-    let agent_line = Line::from(vec![
-        Span::styled("  Agent", label_style(is_agent)),
-        Span::raw(" ".repeat((label_w as usize).saturating_sub(7))),
-        Span::styled("\u{2039} ", Style::default().fg(if is_agent { FOCUS } else { DIM })),
-        Span::styled(kind_label, val_style(is_agent)),
-        Span::styled(" \u{203a}", Style::default().fg(if is_agent { FOCUS } else { DIM })),
-    ]);
+    let agent_line = picker_row("Agent", agent_name.as_str(), is_agent);
     frame.render_widget(Paragraph::new(agent_line), chunks[1]);
 
     // --- Repo row ---
     let is_repo = matches!(focus, NewAgentFocus::Repo);
-    let repo_arrows = if repos.len() > 1 { ("\u{2039} ", " \u{203a}") } else { ("", "") };
-    let repo_line = Line::from(vec![
-        Span::styled("  Repo", label_style(is_repo)),
-        Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
-        Span::styled(repo_arrows.0, Style::default().fg(if is_repo { FOCUS } else { DIM })),
-        Span::styled(repo_name, val_style(is_repo)),
-        Span::styled(repo_arrows.1, Style::default().fg(if is_repo { FOCUS } else { DIM })),
-    ]);
+    let repo_line = picker_row("Repo", repo_name, is_repo);
     frame.render_widget(Paragraph::new(repo_line), chunks[3]);
 
     // --- Branch toggle row ---
@@ -443,13 +427,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         BranchMode::New => "New",
         BranchMode::Existing => "Existing",
     };
-    let toggle_line = Line::from(vec![
-        Span::styled("  Branch", label_style(is_toggle)),
-        Span::raw(" ".repeat((label_w as usize).saturating_sub(8))),
-        Span::styled("\u{2039} ", Style::default().fg(if is_toggle { FOCUS } else { DIM })),
-        Span::styled(mode_label, val_style(is_toggle)),
-        Span::styled(" \u{203a}", Style::default().fg(if is_toggle { FOCUS } else { DIM })),
-    ]);
+    let toggle_line = picker_row("Branch", mode_label, is_toggle);
     frame.render_widget(Paragraph::new(toggle_line), chunks[5]);
 
     // --- Branch list ---
@@ -480,7 +458,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
                 let selected = i == *base_index;
                 let indicator = if selected { "\u{2502} " } else { "  " };
                 let style = if selected && is_list {
-                    Style::default().fg(FOCUS)
+                    Style::default().fg(ACCENT)
                 } else if selected {
                     Style::default().fg(TEXT)
                 } else {
@@ -529,7 +507,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         let placeholder = if is_prompt {
             Line::from(vec![
                 Span::raw(" ".repeat(label_w as usize)),
-                Span::styled("_", Style::default().fg(FOCUS)),
+                Span::styled("_", Style::default().fg(ACCENT)),
             ])
         } else {
             Line::from(vec![
@@ -547,39 +525,43 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
             .sum();
         let scroll = line_count.saturating_sub(prompt_area.height);
         let paragraph = Paragraph::new(text)
-            .style(Style::default().fg(if is_prompt { FOCUS } else { TEXT }))
+            .style(Style::default().fg(if is_prompt { ACCENT } else { TEXT }))
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0));
         frame.render_widget(paragraph, prompt_area);
     }
 
     // --- Hint bar ---
-    let hint = match focus {
+    let hint_line = match focus {
         NewAgentFocus::Agent | NewAgentFocus::Repo | NewAgentFocus::BranchToggle => {
-            "\u{2190} \u{2192} cycle \u{00b7} tab next \u{00b7} esc cancel"
+            footer_hint(&[("←/→", "cycle"), ("tab", "next"), ("q/esc", "cancel")])
         }
         NewAgentFocus::BranchList => {
-            "\u{2191} \u{2193} select \u{00b7} tab next \u{00b7} esc cancel"
+            footer_hint(&[("↑/k", "up"), ("↓/j", "down"), ("tab", "next"), ("q/esc", "cancel")])
         }
         NewAgentFocus::Name => {
-            "tab next \u{00b7} esc cancel"
+            footer_hint(&[("tab", "next"), ("esc", "cancel")])  // q types literally here
         }
         NewAgentFocus::Prompt => {
-            "enter start \u{00b7} alt+enter newline \u{00b7} tab options \u{00b7} esc cancel"
+            footer_hint(&[
+                ("enter", "start"),
+                ("alt+enter", "newline"),
+                ("tab", "options"),
+                ("esc", "cancel"),  // q types literally here
+            ])
         }
     };
-    let hint_line = Line::from(vec![
-        Span::raw(" ".repeat(label_w as usize)),
-        Span::styled(hint, Style::default().fg(DIM)),
-    ]);
-    frame.render_widget(Paragraph::new(hint_line), chunks[11]);
+    // Indent the hint line under the form's value column for visual continuity.
+    let mut spans = vec![Span::raw(" ".repeat(label_w as usize))];
+    spans.extend(hint_line.spans);
+    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[11]);
 }
 
 fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(DIM))
-        .title(Span::styled(" Delete Agent ", Style::default().fg(FOCUS)));
+        .title(modal_title("Delete Agent"));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -605,7 +587,7 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     ));
     let msg2 = Line::from(vec![
         Span::styled("  ", Style::default().fg(TEXT)),
-        Span::styled(name, Style::default().fg(FOCUS)),
+        Span::styled(name, Style::default().fg(ACCENT)),
         Span::styled("?", Style::default().fg(TEXT)),
     ]);
     let msg3 = if has_session {
@@ -624,23 +606,15 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(msg3), chunks[3]);
 
     let hint = if has_session {
-        Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled("y", Style::default().fg(FOCUS)),
-            Span::styled(" delete + tmux  ", Style::default().fg(DIM)),
-            Span::styled("p", Style::default().fg(FOCUS)),
-            Span::styled(" preserve tmux  ", Style::default().fg(DIM)),
-            Span::styled("esc", Style::default().fg(FOCUS)),
-            Span::styled(" cancel", Style::default().fg(DIM)),
+        footer_hint(&[
+            ("y", "delete + tmux"),
+            ("p", "preserve tmux"),
+            ("q/esc", "cancel"),
         ])
     } else {
-        Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled("y", Style::default().fg(FOCUS)),
-            Span::styled(" confirm  ", Style::default().fg(DIM)),
-            Span::styled("esc", Style::default().fg(FOCUS)),
-            Span::styled(" cancel", Style::default().fg(DIM)),
-        ])
+        footer_hint(&[("y", "delete"), ("q/esc", "cancel")])
     };
-    frame.render_widget(Paragraph::new(hint), chunks[5]);
+    let mut spans = vec![Span::raw("  ")];
+    spans.extend(hint.spans);
+    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[5]);
 }
