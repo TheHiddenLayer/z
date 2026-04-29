@@ -527,25 +527,29 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // --- Hint bar ---
-    let hint = match focus {
+    let hint_line = match focus {
         NewAgentFocus::Agent | NewAgentFocus::Repo | NewAgentFocus::BranchToggle => {
-            "\u{2190} \u{2192} cycle \u{00b7} tab next \u{00b7} esc cancel"
+            footer_hint(&[("←/→", "cycle"), ("tab", "next"), ("esc", "cancel")])
         }
         NewAgentFocus::BranchList => {
-            "\u{2191} \u{2193} select \u{00b7} tab next \u{00b7} esc cancel"
+            footer_hint(&[("↑/k", "up"), ("↓/j", "down"), ("tab", "next"), ("esc", "cancel")])
         }
         NewAgentFocus::Name => {
-            "tab next \u{00b7} esc cancel"
+            footer_hint(&[("tab", "next"), ("esc", "cancel")])
         }
         NewAgentFocus::Prompt => {
-            "enter start \u{00b7} alt+enter newline \u{00b7} tab options \u{00b7} esc cancel"
+            footer_hint(&[
+                ("enter", "start"),
+                ("alt+enter", "newline"),
+                ("tab", "options"),
+                ("esc", "cancel"),
+            ])
         }
     };
-    let hint_line = Line::from(vec![
-        Span::raw(" ".repeat(label_w as usize)),
-        Span::styled(hint, Style::default().fg(DIM)),
-    ]);
-    frame.render_widget(Paragraph::new(hint_line), chunks[11]);
+    // Indent the hint line under the form's value column for visual continuity.
+    let mut spans = vec![Span::raw(" ".repeat(label_w as usize))];
+    spans.extend(hint_line.spans);
+    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[11]);
 }
 
 fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
