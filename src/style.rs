@@ -45,6 +45,13 @@ pub fn footer_hint(items: &[(&str, &str)]) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The "→" between an agent's slug and its actual branch name when they
+/// disagree. Drift is a structural fact, not a status — DIM, glyph carries
+/// the meaning.
+pub fn drift_arrow() -> Span<'static> {
+    Span::styled(" \u{2192} ", Style::default().fg(DIM))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +135,13 @@ mod tests {
     fn footer_hint_empty_input_yields_empty_line() {
         let line = footer_hint(&[]);
         assert!(line.spans.is_empty());
+    }
+
+    #[test]
+    fn drift_arrow_is_dim_not_busy() {
+        let span = drift_arrow();
+        assert_eq!(span.content, " \u{2192} ");
+        assert_eq!(span.style, Style::default().fg(DIM));
+        assert_ne!(span.style.fg, Some(BUSY));
     }
 }

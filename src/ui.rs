@@ -8,7 +8,7 @@ use ratatui::{
 use crate::app::{App, Mode};
 use crate::agent::{Agent, AgentStatus};
 
-use crate::style::{ACCENT, BUSY, DIM, TEXT, footer_hint, status_color};
+use crate::style::{ACCENT, DIM, TEXT, drift_arrow, footer_hint, status_color};
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
 
@@ -162,7 +162,7 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
         let branch_cell = if drifted {
             Line::from(vec![
                 Span::styled(agent.slug.as_str(), text_style),
-                Span::styled(" \u{2192} ", Style::default().fg(BUSY)),
+                drift_arrow(),
                 Span::styled(agent.branch.as_str(), text_style.add_modifier(Modifier::ITALIC)),
             ])
         } else {
@@ -215,7 +215,7 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
         let mut spans = vec![Span::styled(" ", dim_style)];
         if drifted {
             spans.push(Span::styled(agent.slug.as_str(), accent_style));
-            spans.push(Span::styled(" \u{2192} ", Style::default().fg(BUSY)));
+            spans.push(drift_arrow());
             spans.push(Span::styled(
                 agent.branch.as_str(),
                 accent_style.add_modifier(Modifier::ITALIC),
