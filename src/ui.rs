@@ -582,7 +582,7 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     ));
     let msg2 = Line::from(vec![
         Span::styled("  ", Style::default().fg(TEXT)),
-        Span::styled(name, Style::default().fg(ACCENT)),
+        Span::styled(name, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
         Span::styled("?", Style::default().fg(TEXT)),
     ]);
     let msg3 = if has_session {
