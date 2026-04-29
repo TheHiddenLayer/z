@@ -53,7 +53,6 @@ pub fn drift_arrow() -> Span<'static> {
 }
 
 /// Modal/dialog title span. Bold + TEXT — emphasis from weight, not color.
-/// ACCENT is reserved for selection/focus and must not appear on chrome.
 pub fn modal_title(text: &str) -> Span<'static> {
     Span::styled(
         format!(" {text} "),
