@@ -142,13 +142,13 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
 
         let indicator = if is_selected { "\u{2502}" } else { " " };
         let indicator_style = if is_selected {
-            Style::default().fg(ACCENT)
+            Style::default().fg(TEXT)
         } else {
             Style::default()
         };
 
         let text_style = if is_selected {
-            Style::default().fg(ACCENT)
+            Style::default().fg(TEXT)
         } else {
             Style::default().fg(DIM)
         };
