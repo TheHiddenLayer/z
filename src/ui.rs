@@ -429,7 +429,6 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(toggle_line), chunks[5]);
 
     // --- Branch list ---
-    let is_list = matches!(focus, NewAgentFocus::BranchList);
     let list_area = chunks[6];
     if active_list.is_empty() {
         let empty_msg = match branch_mode {
@@ -455,9 +454,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
             .map(|(i, b)| {
                 let selected = i == *base_index;
                 let indicator = if selected { "\u{2502} " } else { "  " };
-                let style = if selected && is_list {
-                    Style::default().fg(ACCENT)
-                } else if selected {
+                let style = if selected {
                     Style::default().fg(TEXT)
                 } else {
                     Style::default().fg(DIM)
