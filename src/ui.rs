@@ -529,20 +529,20 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     // --- Hint bar ---
     let hint_line = match focus {
         NewAgentFocus::Agent | NewAgentFocus::Repo | NewAgentFocus::BranchToggle => {
-            footer_hint(&[("←/→", "cycle"), ("tab", "next"), ("esc", "cancel")])
+            footer_hint(&[("←/→", "cycle"), ("tab", "next"), ("q/esc", "cancel")])
         }
         NewAgentFocus::BranchList => {
-            footer_hint(&[("↑/k", "up"), ("↓/j", "down"), ("tab", "next"), ("esc", "cancel")])
+            footer_hint(&[("↑/k", "up"), ("↓/j", "down"), ("tab", "next"), ("q/esc", "cancel")])
         }
         NewAgentFocus::Name => {
-            footer_hint(&[("tab", "next"), ("esc", "cancel")])
+            footer_hint(&[("tab", "next"), ("esc", "cancel")])  // q types literally here
         }
         NewAgentFocus::Prompt => {
             footer_hint(&[
                 ("enter", "start"),
                 ("alt+enter", "newline"),
                 ("tab", "options"),
-                ("esc", "cancel"),
+                ("esc", "cancel"),  // q types literally here
             ])
         }
     };
@@ -604,10 +604,10 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
         footer_hint(&[
             ("y", "delete + tmux"),
             ("p", "preserve tmux"),
-            ("esc", "cancel"),
+            ("q/esc", "cancel"),
         ])
     } else {
-        footer_hint(&[("y", "delete"), ("esc", "cancel")])
+        footer_hint(&[("y", "delete"), ("q/esc", "cancel")])
     };
     let mut spans = vec![Span::raw("  ")];
     spans.extend(hint.spans);
