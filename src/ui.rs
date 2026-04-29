@@ -18,7 +18,6 @@ const BUSY: Color = Color::Yellow;    // spinner + slug → branch drift (in-fli
 const FAIL: Color = Color::Red;       // error glyph
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
-const AGENT_VISIBLE_ROWS: usize = (AGENT_TABLE_HEIGHT as usize) - 2;
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::vertical([
@@ -82,19 +81,29 @@ const SPINNER_FRAMES: [&str; 10] = [
     "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}",
 ];
 
+fn status_color(agent: &Agent) -> Color {
+    match &agent.status {
+        AgentStatus::Error(_) => FAIL,
+        AgentStatus::Stopped => DIM,
+        _ if agent.shows_spinner() => BUSY,
+        _ => READY,
+    }
+}
+
 fn status_glyph(agent: &Agent, frame_idx: usize, _base: Style) -> Span<'static> {
     // The status glyph carries its own semantics — yellow spinner = working,
     // green ✓ = quiet/done, red ✗ = failed, dim − = stopped. The spinner→✓
     // transition is a color change as well as a glyph change so the moment
     // an agent finishes pops in peripheral vision.
+    let style = Style::default().fg(status_color(agent));
     match &agent.status {
-        AgentStatus::Error(_) => Span::styled("\u{2717}", Style::default().fg(FAIL)),
-        AgentStatus::Stopped => Span::styled("\u{2212}", Style::default().fg(DIM)),
+        AgentStatus::Error(_) => Span::styled("\u{2717}", style),
+        AgentStatus::Stopped => Span::styled("\u{2212}", style),
         _ if agent.shows_spinner() => {
             let g = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
-            Span::styled(g, Style::default().fg(BUSY))
+            Span::styled(g, style)
         }
-        _ => Span::styled("\u{2713}", Style::default().fg(READY)),
+        _ => Span::styled("\u{2713}", style),
     }
 }
 
@@ -236,12 +245,6 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             spans.push(Span::styled(agent.branch.as_str(), accent_style));
         }
-        if let Some(base) = agent.base_branch.as_deref().filter(|b| !b.is_empty()) {
-            spans.push(Span::styled(" \u{00b7} ", dim_style));
-            spans.push(Span::styled(base, dim_style));
-        }
-        spans.push(Span::styled(" \u{00b7} ", dim_style));
-        spans.push(Span::styled(agent.repo_name.as_str(), dim_style));
         spans.push(Span::styled(" ", dim_style));
         Some(spans)
     } else {
@@ -249,13 +252,19 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let total = app.agents.len();
-    let position_spans: Option<Vec<Span>> = if total > AGENT_VISIBLE_ROWS {
+    let position_spans: Option<Vec<Span>> = if total > 0 {
         let dim_style = Style::default().fg(DIM);
-        Some(vec![
-            Span::styled(" ", dim_style),
-            Span::styled(format!("{}/{}", app.selected + 1, total), dim_style),
-            Span::styled(" ", dim_style),
-        ])
+        let mut spans = vec![Span::styled(" ", dim_style)];
+        for (i, agent) in app.agents.iter().enumerate() {
+            let glyph = if i == app.selected { "\u{25CF}" } else { "\u{00B7}" };
+            let style = Style::default().fg(status_color(agent));
+            spans.push(Span::styled(glyph, style));
+            if i + 1 < total {
+                spans.push(Span::styled(" ", dim_style));
+            }
+        }
+        spans.push(Span::styled(" ", dim_style));
+        Some(spans)
     } else {
         None
     };
@@ -265,13 +274,13 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
             let label_len: usize = label.iter().map(|s| s.width()).sum();
             let pos_len: usize = pos.iter().map(|s| s.width()).sum();
             let left_dashes = 3;
-            let right_dashes = 3;
-            let middle_dashes = w
-                .saturating_sub(left_dashes + label_len + pos_len + right_dashes);
+            let middle_dashes = 3;
+            let right_dashes = w
+                .saturating_sub(left_dashes + pos_len + middle_dashes + label_len);
             let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
-            spans.extend(label);
-            spans.push(Span::styled("\u{2500}".repeat(middle_dashes), dash_style));
             spans.extend(pos);
+            spans.push(Span::styled("\u{2500}".repeat(middle_dashes), dash_style));
+            spans.extend(label);
             spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
             Line::from(spans)
         }
@@ -286,8 +295,8 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
         }
         (None, Some(pos)) => {
             let pos_len: usize = pos.iter().map(|s| s.width()).sum();
-            let right_dashes = 3;
-            let left_dashes = w.saturating_sub(pos_len + right_dashes);
+            let left_dashes = 3;
+            let right_dashes = w.saturating_sub(left_dashes + pos_len);
             let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
             spans.extend(pos);
             spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
