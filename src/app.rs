@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::agent::{self, Agent, AgentStatus};
@@ -74,12 +73,13 @@ pub enum Action {
         error: String,
     },
     AgentsRefreshed(Vec<Agent>),
-    PreviewUpdated {
-        content: Option<String>,
-        generation: u64,
-    },
     ActivityCaptured {
         session_name: String,
+        /// Pane content from the same capture-pane call that produced
+        /// `content_hash`. The selected agent uses this directly as preview;
+        /// non-selected agents discard it. `None` only in tests that exercise
+        /// activity hysteresis without caring about preview content.
+        content: Option<String>,
         content_hash: u64,
         attached_count: u32,
     },
@@ -126,7 +126,6 @@ fn generate_branch_name(branches: &[String], date_str: &str) -> String {
 pub enum Command {
     Discover(Vec<PathBuf>),
     LoadBranches(PathBuf),
-    CapturePreview { session: String, generation: u64 },
     CaptureActivity { session_name: String },
     CreateAgent {
         repo: PathBuf,
@@ -187,12 +186,10 @@ pub struct App {
     pub should_quit: bool,
     pub status_message: Option<String>,
     pub preview_content: Option<String>,
-    pub preview_generation: u64,
     pub spinner_frame: usize,
     pub dirty: bool,
 
     // Backpressure: prevent spawning new work when previous is in-flight
-    preview_pending: bool,
     discover_pending: bool,
 
     // Notification gating
@@ -209,10 +206,8 @@ impl App {
             should_quit: false,
             status_message: None,
             preview_content: None,
-            preview_generation: 0,
             spinner_frame: 0,
             dirty: true, // render on first frame
-            preview_pending: false,
             discover_pending: false,
             focused: true,
         }
@@ -246,12 +241,15 @@ impl App {
         self.agents.get(self.selected)
     }
 
-    fn preview_command(&self) -> Option<Command> {
+    /// Activity capture for the selected session, used to repaint the preview
+    /// pane immediately after navigation. The same Command type that the Tick
+    /// loop fires periodically — its content lands in `preview_content` when
+    /// the session matches the current selection.
+    fn capture_selected_command(&self) -> Option<Command> {
         let agent = self.selected_agent()?;
         if agent.status.has_session() {
-            Some(Command::CapturePreview {
-                session: agent.session_name.clone(),
-                generation: self.preview_generation,
+            Some(Command::CaptureActivity {
+                session_name: agent.session_name.clone(),
             })
         } else {
             None
@@ -270,12 +268,11 @@ impl App {
     /// Core state machine. Returns Commands for side effects to be executed by the caller.
     pub fn update(&mut self, action: Action) -> Vec<Command> {
         let mut cmds = vec![];
-        // Background results (PreviewUpdated) set dirty only when content
-        // actually changes. All other non-Tick actions change visible state
+        // ActivityCaptured sets dirty itself only when something visible
+        // actually changed. All other non-Tick actions change visible state
         // and need a redraw.
         match &action {
             Action::Tick
-            | Action::PreviewUpdated { .. }
             | Action::ActivityCaptured { .. }
             | Action::TerminalFocus(_) => {}
             _ => { self.dirty = true; }
@@ -285,10 +282,10 @@ impl App {
             Action::MoveUp => {
                 if self.selected > 0 {
                     self.selected -= 1;
-                    self.preview_generation += 1;
+                    // Honest blank > stale content: clear immediately and
+                    // wait for the new selection's capture to land.
                     self.preview_content = None;
-                    if let Some(cmd) = self.preview_command() {
-                        self.preview_pending = true;
+                    if let Some(cmd) = self.capture_selected_command() {
                         cmds.push(cmd);
                     }
                 }
@@ -296,10 +293,8 @@ impl App {
             Action::MoveDown => {
                 if self.selected + 1 < self.agents.len() {
                     self.selected += 1;
-                    self.preview_generation += 1;
                     self.preview_content = None;
-                    if let Some(cmd) = self.preview_command() {
-                        self.preview_pending = true;
+                    if let Some(cmd) = self.capture_selected_command() {
                         cmds.push(cmd);
                     }
                 }
@@ -663,14 +658,20 @@ impl App {
                     self.selected = self.agents.len() - 1;
                 }
             }
-            Action::PreviewUpdated { content, generation } => {
-                self.preview_pending = false;
-                if generation == self.preview_generation && content != self.preview_content {
-                    self.preview_content = content;
+            Action::ActivityCaptured { session_name, content, content_hash, attached_count } => {
+                // If this capture is for the currently-selected agent, the
+                // pane content doubles as preview material.
+                let is_selected = self
+                    .selected_agent()
+                    .is_some_and(|a| a.session_name == session_name);
+                if is_selected
+                    && let Some(c) = content
+                    && self.preview_content.as_deref() != Some(c.as_str())
+                {
+                    self.preview_content = Some(c);
                     self.dirty = true;
                 }
-            }
-            Action::ActivityCaptured { session_name, content_hash, attached_count } => {
+
                 if let Some(agent) = self
                     .agents
                     .iter_mut()
@@ -758,29 +759,15 @@ impl App {
             Action::Tick => {
                 self.spinner_frame = self.spinner_frame.wrapping_add(1);
 
-                // Snapshot last tick's spinner set BEFORE we mutate
-                // was_spinner_visible below — needed for the dirty-redraw
-                // check.
-                let prev_working: HashSet<String> = self.agents.iter()
-                    .filter(|a| a.was_spinner_visible)
-                    .map(|a| a.session_name.clone())
-                    .collect();
-
-                let mut current_working: HashSet<String> = HashSet::new();
-                for agent in &self.agents {
-                    if agent.shows_spinner() {
-                        current_working.insert(agent.session_name.clone());
-                    }
-                }
-                // Redraw whenever a spinner is visible OR the working set just
-                // changed. The set-difference clause guarantees the working→done
-                // transition frame renders even when the working set becomes
-                // empty (otherwise the spinner would freeze on its last frame
-                // until something else dirtied the canvas).
-                if !current_working.is_empty() || current_working != prev_working {
-                    self.dirty = true;
-                }
+                // Walk agents once: fire the spinner→done notification edge,
+                // update was_spinner_visible, and decide whether to repaint.
+                // Repaint when any spinner is visible (animate it) OR any
+                // agent's working state flipped (catch the working→done
+                // transition frame, which would otherwise freeze the spinner
+                // on its last glyph).
                 let notify = self.should_notify();
+                let mut any_visible = false;
+                let mut any_change = false;
                 for agent in self.agents.iter_mut() {
                     let visible_now = agent.shows_spinner();
                     let just_finished = agent.was_spinner_visible
@@ -801,21 +788,22 @@ impl App {
                         // seen_activity_since_seed back on.
                         agent.seen_activity_since_seed = false;
                     }
+                    if visible_now {
+                        any_visible = true;
+                    }
+                    if visible_now != agent.was_spinner_visible {
+                        any_change = true;
+                    }
                     agent.was_spinner_visible = visible_now;
                 }
-
-                // Preview capture only matters when the preview pane is visible.
-                if let Mode::Normal = self.mode
-                    && self.spinner_frame.is_multiple_of(5)
-                    && !self.preview_pending
-                    && let Some(cmd) = self.preview_command() {
-                        self.preview_pending = true;
-                        cmds.push(cmd);
-                    }
+                if any_visible || any_change {
+                    self.dirty = true;
+                }
 
                 // Activity capture: every 5th tick (~500ms), one per session-having
                 // agent. Drives sub-second "done" detection via content-hash deltas
-                // (replaces the coarse-grained tmux window_activity timestamp).
+                // (replaces the coarse-grained tmux window_activity timestamp), and
+                // the selected agent's capture doubles as preview content.
                 if self.spinner_frame.is_multiple_of(5) {
                     for agent in &self.agents {
                         if agent.status.has_session() {
@@ -1089,6 +1077,7 @@ mod tests {
         // reset so the new seed doesn't pretend prior activity continues.
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0xc0ffee,
             attached_count: 0,
         });
@@ -1150,6 +1139,7 @@ mod tests {
         // false, and the spinner does NOT come back on.
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0xb1_u64,
             attached_count: 0,
         });
@@ -1162,6 +1152,7 @@ mod tests {
         for _ in 0..crate::agent::QUIET_THRESHOLD {
             app.update(Action::ActivityCaptured {
                 session_name: "z-myapp-fix-auth".into(),
+                content: None,
                 content_hash: 0xb1_u64,
                 attached_count: 0,
             });
@@ -1191,11 +1182,13 @@ mod tests {
         // Two consecutive hash deltas confirm a real new burst.
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0xa1_u64,
             attached_count: 0,
         });
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0xa2_u64,
             attached_count: 0,
         });
@@ -1911,12 +1904,12 @@ mod tests {
     }
 
     #[test]
-    fn move_down_returns_preview_command() {
+    fn move_down_returns_capture_for_new_selection() {
         let mut app = test_app();
         app.agents = vec![mock_agent("a"), mock_agent("b")];
         let cmds = app.update(Action::MoveDown);
         assert_eq!(app.selected, 1);
-        assert!(matches!(cmds[0], Command::CapturePreview { .. }));
+        assert!(matches!(cmds[0], Command::CaptureActivity { .. }));
     }
 
     #[test]
@@ -2474,6 +2467,7 @@ mod tests {
 
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0xdead_beef,
             attached_count: 0,
         });
@@ -2494,6 +2488,7 @@ mod tests {
 
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0x1234,
             attached_count: 0,
         });
@@ -2519,6 +2514,7 @@ mod tests {
 
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0x5678,
             attached_count: 0,
         });
@@ -2545,11 +2541,13 @@ mod tests {
 
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0x5678,
             attached_count: 0,
         });
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0x9abc,
             attached_count: 0,
         });
@@ -2573,6 +2571,7 @@ mod tests {
 
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0x9999,
             attached_count: 0,
         });
@@ -2600,6 +2599,7 @@ mod tests {
 
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0x5678, // changed due to reflow
             attached_count: 1,    // user just attached
         });
@@ -2631,6 +2631,7 @@ mod tests {
 
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0xc0ffee, // pane reflowed on detach — hash differs
             attached_count: 0,
         });
@@ -2654,6 +2655,7 @@ mod tests {
 
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0xc0ffee,
             attached_count: 0,
         });
@@ -2674,6 +2676,7 @@ mod tests {
 
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0xc0ffee,
             attached_count: 0,
         });
@@ -2694,6 +2697,7 @@ mod tests {
 
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0xfeedbeef,
             attached_count: 1, // user attached — pane reflowed
         });
@@ -2739,11 +2743,13 @@ mod tests {
 
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0x5678,
             attached_count: 1,
         });
         app.update(Action::ActivityCaptured {
             session_name: "z-myapp-fix-auth".into(),
+            content: None,
             content_hash: 0x9abc,
             attached_count: 1,
         });
