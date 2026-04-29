@@ -4,7 +4,8 @@
 //! status indicators — never in chrome. ACCENT means "current selection or
 //! focus" — never status, never decoration.
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 
 use crate::agent::{Agent, AgentStatus};
 
@@ -22,6 +23,26 @@ pub fn status_color(agent: &Agent) -> Color {
         _ if agent.shows_spinner() => BUSY,
         _ => OK,
     }
+}
+
+/// Build a footer hint line: bold key + dim label, repeated, separated by ` · `.
+///
+/// One contract for every screen: keys are bold and at terminal-text brightness,
+/// labels are dim, separator is a middle dot. Pairs are `(key, label)` so authors
+/// keep the binding glyph and its verb visually adjacent in source.
+pub fn footer_hint(items: &[(&str, &str)]) -> Line<'static> {
+    let key_style = Style::default().fg(TEXT).add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(DIM);
+    let sep = " \u{00b7} ";
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, (key, label)) in items.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(sep, label_style));
+        }
+        spans.push(Span::styled((*key).to_string(), key_style));
+        spans.push(Span::styled(format!(" {label}"), label_style));
+    }
+    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -69,5 +90,43 @@ mod tests {
         a.was_spinner_visible = false;
         assert!(!a.shows_spinner());
         assert_eq!(status_color(&a), OK);
+    }
+
+    use ratatui::style::Modifier;
+
+    #[test]
+    fn footer_hint_renders_single_pair() {
+        let line = footer_hint(&[("q", "quit")]);
+        // 2 spans: bold key, dim label
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content, "q");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        );
+        assert_eq!(line.spans[1].content, " quit");
+        assert_eq!(line.spans[1].style, Style::default().fg(DIM));
+    }
+
+    #[test]
+    fn footer_hint_inserts_bullet_separator_between_pairs() {
+        let line = footer_hint(&[("q", "quit"), ("?", "help")]);
+        // 5 spans: key, label, sep, key, label
+        assert_eq!(line.spans.len(), 5);
+        assert_eq!(line.spans[2].content, " \u{00b7} ");
+        assert_eq!(line.spans[2].style, Style::default().fg(DIM));
+    }
+
+    #[test]
+    fn footer_hint_no_trailing_separator() {
+        let line = footer_hint(&[("a", "b"), ("c", "d")]);
+        let last = line.spans.last().unwrap();
+        assert_eq!(last.content, " d");
+    }
+
+    #[test]
+    fn footer_hint_empty_input_yields_empty_line() {
+        let line = footer_hint(&[]);
+        assert!(line.spans.is_empty());
     }
 }
