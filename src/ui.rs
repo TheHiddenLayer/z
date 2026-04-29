@@ -8,7 +8,7 @@ use ratatui::{
 use crate::app::{App, Mode};
 use crate::agent::{Agent, AgentStatus};
 
-use crate::style::{ACCENT, BUSY, DIM, TEXT, status_color};
+use crate::style::{ACCENT, BUSY, DIM, TEXT, footer_hint, status_color};
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
 
@@ -317,28 +317,17 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let line = if let Some(msg) = &app.status_message {
         Line::from(Span::styled(msg.as_str(), Style::default().fg(DIM)))
     } else {
-        let key_style = Style::default().fg(TEXT).add_modifier(Modifier::BOLD);
-        let label_style = Style::default().fg(DIM);
-        Line::from(vec![
-            Span::styled("n", key_style),
-            Span::styled(" new", label_style),
-            Span::styled(" \u{00b7} ", label_style),
-            Span::styled("a", key_style),
-            Span::styled(" attach", label_style),
-            Span::styled(" \u{00b7} ", label_style),
-            Span::styled("x", key_style),
-            Span::styled(" stop", label_style),
-            Span::styled(" \u{00b7} ", label_style),
-            Span::styled("d", key_style),
-            Span::styled(" delete", label_style),
-            Span::styled(" \u{00b7} ", label_style),
-            Span::styled("q", key_style),
-            Span::styled(" quit", label_style),
+        footer_hint(&[
+            ("↑/k", "up"),
+            ("↓/j", "down"),
+            ("n", "new"),
+            ("a", "attach"),
+            ("x", "stop"),
+            ("d", "delete"),
+            ("q", "quit"),
         ])
     };
-
-    let bar = Paragraph::new(line);
-    frame.render_widget(bar, area);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
