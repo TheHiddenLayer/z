@@ -81,19 +81,29 @@ const SPINNER_FRAMES: [&str; 10] = [
     "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}",
 ];
 
+fn status_color(agent: &Agent) -> Color {
+    match &agent.status {
+        AgentStatus::Error(_) => FAIL,
+        AgentStatus::Stopped => DIM,
+        _ if agent.shows_spinner() => BUSY,
+        _ => READY,
+    }
+}
+
 fn status_glyph(agent: &Agent, frame_idx: usize, _base: Style) -> Span<'static> {
     // The status glyph carries its own semantics — yellow spinner = working,
     // green ✓ = quiet/done, red ✗ = failed, dim − = stopped. The spinner→✓
     // transition is a color change as well as a glyph change so the moment
     // an agent finishes pops in peripheral vision.
+    let style = Style::default().fg(status_color(agent));
     match &agent.status {
-        AgentStatus::Error(_) => Span::styled("\u{2717}", Style::default().fg(FAIL)),
-        AgentStatus::Stopped => Span::styled("\u{2212}", Style::default().fg(DIM)),
+        AgentStatus::Error(_) => Span::styled("\u{2717}", style),
+        AgentStatus::Stopped => Span::styled("\u{2212}", style),
         _ if agent.shows_spinner() => {
             let g = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
-            Span::styled(g, Style::default().fg(BUSY))
+            Span::styled(g, style)
         }
-        _ => Span::styled("\u{2713}", Style::default().fg(READY)),
+        _ => Span::styled("\u{2713}", style),
     }
 }
 
@@ -244,11 +254,10 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
     let total = app.agents.len();
     let position_spans: Option<Vec<Span>> = if total > 0 {
         let dim_style = Style::default().fg(DIM);
-        let accent_style = Style::default().fg(FOCUS);
         let mut spans = vec![Span::styled(" ", dim_style)];
-        for i in 0..total {
+        for (i, agent) in app.agents.iter().enumerate() {
             let glyph = if i == app.selected { "\u{25CF}" } else { "\u{00B7}" };
-            let style = if i == app.selected { accent_style } else { dim_style };
+            let style = Style::default().fg(status_color(agent));
             spans.push(Span::styled(glyph, style));
             if i + 1 < total {
                 spans.push(Span::styled(" ", dim_style));
