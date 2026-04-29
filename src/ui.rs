@@ -209,19 +209,19 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
 
     let label_spans = if let Some(agent) = app.selected_agent() {
         let dim_style = Style::default().fg(DIM);
-        let accent_style = Style::default().fg(ACCENT);
+        let label_style = Style::default().fg(TEXT);
 
         let drifted = agent.slug != agent.branch.replace('/', "-");
         let mut spans = vec![Span::styled(" ", dim_style)];
         if drifted {
-            spans.push(Span::styled(agent.slug.as_str(), accent_style));
+            spans.push(Span::styled(agent.slug.as_str(), label_style));
             spans.push(drift_arrow());
             spans.push(Span::styled(
                 agent.branch.as_str(),
-                accent_style.add_modifier(Modifier::ITALIC),
+                label_style.add_modifier(Modifier::ITALIC),
             ));
         } else {
-            spans.push(Span::styled(agent.branch.as_str(), accent_style));
+            spans.push(Span::styled(agent.branch.as_str(), label_style));
         }
         spans.push(Span::styled(" ", dim_style));
         Some(spans)
