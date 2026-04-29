@@ -1,14 +1,14 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
 };
 use crate::app::{App, Mode};
 use crate::agent::{Agent, AgentStatus};
 
-use crate::style::{ACCENT, BUSY, DIM, FAIL, OK, TEXT};
+use crate::style::{ACCENT, BUSY, DIM, TEXT, status_color};
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
 
@@ -73,15 +73,6 @@ const SPINNER_FRAMES: [&str; 10] = [
     "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}",
     "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}",
 ];
-
-fn status_color(agent: &Agent) -> Color {
-    match &agent.status {
-        AgentStatus::Error(_) => FAIL,
-        AgentStatus::Stopped => DIM,
-        _ if agent.shows_spinner() => BUSY,
-        _ => OK,
-    }
-}
 
 fn status_glyph(agent: &Agent, frame_idx: usize, _base: Style) -> Span<'static> {
     // The status glyph carries its own semantics — yellow spinner = working,

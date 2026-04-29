@@ -722,7 +722,7 @@ pub async fn discover_all(repos: &[PathBuf]) -> Vec<Agent> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // --- AgentStatus tests ---
@@ -1016,7 +1016,7 @@ detached
         assert_eq!(QUIET_THRESHOLD, 7);
     }
 
-    fn make_agent_with_status(status: AgentStatus) -> Agent {
+    pub(crate) fn make_agent_with_status(status: AgentStatus) -> Agent {
         Agent {
             repo_path: std::path::PathBuf::from("/r"),
             repo_name: "r".into(),
