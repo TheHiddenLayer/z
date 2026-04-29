@@ -380,28 +380,45 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         if focused { Style::default().fg(ACCENT) } else { Style::default().fg(TEXT) }
     };
 
+    // Picker row: "│ Label    value" when focused, "  Label    value" when not.
+    // Replaces the old "‹ value ›" arrow chrome — selection is now expressed
+    // by the left bar + ACCENT, the same way every other list in z does it.
+    let picker_row = |label: &str, value: &str, focused: bool| -> Line<'static> {
+        let indicator = if focused { "\u{2502} " } else { "  " };
+        let indicator_style = if focused {
+            Style::default().fg(ACCENT)
+        } else {
+            Style::default()
+        };
+        let label_style = if focused {
+            Style::default().fg(ACCENT)
+        } else {
+            Style::default().fg(DIM)
+        };
+        let value_style = if focused {
+            Style::default().fg(ACCENT)
+        } else {
+            Style::default().fg(TEXT)
+        };
+        let label_field_w = label_w as usize;
+        // Label occupies the label column; value starts at column label_w + 2.
+        let label_padding = label_field_w.saturating_sub(label.len() + 2);
+        Line::from(vec![
+            Span::styled(indicator.to_string(), indicator_style),
+            Span::styled(label.to_string(), label_style),
+            Span::raw(" ".repeat(label_padding)),
+            Span::styled(value.to_string(), value_style),
+        ])
+    };
+
     // --- Agent row ---
     let is_agent = matches!(focus, NewAgentFocus::Agent);
-    let kind_label = agent_name.as_str();
-    let agent_line = Line::from(vec![
-        Span::styled("  Agent", label_style(is_agent)),
-        Span::raw(" ".repeat((label_w as usize).saturating_sub(7))),
-        Span::styled("\u{2039} ", Style::default().fg(if is_agent { ACCENT } else { DIM })),
-        Span::styled(kind_label, val_style(is_agent)),
-        Span::styled(" \u{203a}", Style::default().fg(if is_agent { ACCENT } else { DIM })),
-    ]);
+    let agent_line = picker_row("Agent", agent_name.as_str(), is_agent);
     frame.render_widget(Paragraph::new(agent_line), chunks[1]);
 
     // --- Repo row ---
     let is_repo = matches!(focus, NewAgentFocus::Repo);
-    let repo_arrows = if repos.len() > 1 { ("\u{2039} ", " \u{203a}") } else { ("", "") };
-    let repo_line = Line::from(vec![
-        Span::styled("  Repo", label_style(is_repo)),
-        Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
-        Span::styled(repo_arrows.0, Style::default().fg(if is_repo { ACCENT } else { DIM })),
-        Span::styled(repo_name, val_style(is_repo)),
-        Span::styled(repo_arrows.1, Style::default().fg(if is_repo { ACCENT } else { DIM })),
-    ]);
+    let repo_line = picker_row("Repo", repo_name, is_repo);
     frame.render_widget(Paragraph::new(repo_line), chunks[3]);
 
     // --- Branch toggle row ---
@@ -410,13 +427,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         BranchMode::New => "New",
         BranchMode::Existing => "Existing",
     };
-    let toggle_line = Line::from(vec![
-        Span::styled("  Branch", label_style(is_toggle)),
-        Span::raw(" ".repeat((label_w as usize).saturating_sub(8))),
-        Span::styled("\u{2039} ", Style::default().fg(if is_toggle { ACCENT } else { DIM })),
-        Span::styled(mode_label, val_style(is_toggle)),
-        Span::styled(" \u{203a}", Style::default().fg(if is_toggle { ACCENT } else { DIM })),
-    ]);
+    let toggle_line = picker_row("Branch", mode_label, is_toggle);
     frame.render_widget(Paragraph::new(toggle_line), chunks[5]);
 
     // --- Branch list ---
