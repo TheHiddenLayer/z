@@ -8,7 +8,7 @@ use ratatui::{
 use crate::app::{App, Mode};
 use crate::agent::{Agent, AgentStatus};
 
-use crate::style::{ACCENT, DIM, TEXT, drift_arrow, footer_hint, modal_title, status_color};
+use crate::style::{DIM, TEXT, drift_arrow, footer_hint, modal_title, status_color};
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
 
@@ -142,13 +142,13 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
 
         let indicator = if is_selected { "\u{2502}" } else { " " };
         let indicator_style = if is_selected {
-            Style::default().fg(ACCENT)
+            Style::default().fg(TEXT)
         } else {
             Style::default()
         };
 
         let text_style = if is_selected {
-            Style::default().fg(ACCENT)
+            Style::default().fg(TEXT)
         } else {
             Style::default().fg(DIM)
         };
@@ -209,19 +209,19 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
 
     let label_spans = if let Some(agent) = app.selected_agent() {
         let dim_style = Style::default().fg(DIM);
-        let accent_style = Style::default().fg(ACCENT);
+        let label_style = Style::default().fg(TEXT);
 
         let drifted = agent.slug != agent.branch.replace('/', "-");
         let mut spans = vec![Span::styled(" ", dim_style)];
         if drifted {
-            spans.push(Span::styled(agent.slug.as_str(), accent_style));
+            spans.push(Span::styled(agent.slug.as_str(), label_style));
             spans.push(drift_arrow());
             spans.push(Span::styled(
                 agent.branch.as_str(),
-                accent_style.add_modifier(Modifier::ITALIC),
+                label_style.add_modifier(Modifier::ITALIC),
             ));
         } else {
-            spans.push(Span::styled(agent.branch.as_str(), accent_style));
+            spans.push(Span::styled(agent.branch.as_str(), label_style));
         }
         spans.push(Span::styled(" ", dim_style));
         Some(spans)
@@ -377,32 +377,30 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     let label_w = 14u16;
     let label_style = |focused: bool| {
-        if focused { Style::default().fg(ACCENT) } else { Style::default().fg(DIM) }
+        if focused { Style::default().fg(TEXT) } else { Style::default().fg(DIM) }
     };
     let val_style = |focused: bool| {
-        if focused { Style::default().fg(ACCENT) } else { Style::default().fg(TEXT) }
+        if focused { Style::default().fg(TEXT) } else { Style::default().fg(DIM) }
     };
 
     // Picker row: "│ Label    value" when focused, "  Label    value" when not.
-    // Replaces the old "‹ value ›" arrow chrome — selection is now expressed
-    // by the left bar + ACCENT, the same way every other list in z does it.
+    // Selection is encoded by the left bar plus whole-row brightness contrast —
+    // focused rows TEXT, unfocused rows DIM — matching the agent table's
+    // convention. Without it the focus signal is too subtle in a vertical stack.
     let picker_row = |label: &str, value: &str, focused: bool| -> Line<'static> {
         let indicator = if focused { "\u{2502} " } else { "  " };
         let indicator_style = if focused {
-            Style::default().fg(ACCENT)
+            Style::default().fg(TEXT)
         } else {
             Style::default()
         };
-        let label_style = if focused {
-            Style::default().fg(ACCENT)
+        let row_style = if focused {
+            Style::default().fg(TEXT)
         } else {
             Style::default().fg(DIM)
         };
-        let value_style = if focused {
-            Style::default().fg(ACCENT)
-        } else {
-            Style::default().fg(TEXT)
-        };
+        let label_style = row_style;
+        let value_style = row_style;
         let label_field_w = label_w as usize;
         // Label occupies the label column; value starts at column label_w + 2.
         let label_padding = label_field_w.saturating_sub(label.len() + 2);
@@ -434,7 +432,6 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(toggle_line), chunks[5]);
 
     // --- Branch list ---
-    let is_list = matches!(focus, NewAgentFocus::BranchList);
     let list_area = chunks[6];
     if active_list.is_empty() {
         let empty_msg = match branch_mode {
@@ -460,9 +457,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
             .map(|(i, b)| {
                 let selected = i == *base_index;
                 let indicator = if selected { "\u{2502} " } else { "  " };
-                let style = if selected && is_list {
-                    Style::default().fg(ACCENT)
-                } else if selected {
+                let style = if selected {
                     Style::default().fg(TEXT)
                 } else {
                     Style::default().fg(DIM)
@@ -510,7 +505,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         let placeholder = if is_prompt {
             Line::from(vec![
                 Span::raw(" ".repeat(label_w as usize)),
-                Span::styled("_", Style::default().fg(ACCENT)),
+                Span::styled("_", Style::default().fg(TEXT)),
             ])
         } else {
             Line::from(vec![
@@ -528,7 +523,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
             .sum();
         let scroll = line_count.saturating_sub(prompt_area.height);
         let paragraph = Paragraph::new(text)
-            .style(Style::default().fg(if is_prompt { ACCENT } else { TEXT }))
+            .style(Style::default().fg(TEXT))
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0));
         frame.render_widget(paragraph, prompt_area);
@@ -590,7 +585,7 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     ));
     let msg2 = Line::from(vec![
         Span::styled("  ", Style::default().fg(TEXT)),
-        Span::styled(name, Style::default().fg(ACCENT)),
+        Span::styled(name, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
         Span::styled("?", Style::default().fg(TEXT)),
     ]);
     let msg3 = if has_session {

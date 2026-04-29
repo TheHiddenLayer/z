@@ -1,8 +1,9 @@
 //! Design tokens and render helpers for z's TUI.
 //!
-//! Six semantic colors. Status colors (OK/BUSY/FAIL) appear only on agent
-//! status indicators — never in chrome. ACCENT means "current selection or
-//! focus" — never status, never decoration.
+//! Five semantic colors. Status colors (OK/BUSY/FAIL) appear only on agent
+//! status indicators — never in chrome. Selection and focus are encoded
+//! monochromatically: brightness contrast (TEXT vs DIM) plus structural
+//! glyphs like the `│` left bar. Color is reserved for status meaning.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -11,7 +12,6 @@ use crate::agent::{Agent, AgentStatus};
 
 pub const TEXT: Color = Color::Reset;
 pub const DIM: Color = Color::DarkGray;
-pub const ACCENT: Color = Color::Cyan;
 pub const OK: Color = Color::Green;
 pub const BUSY: Color = Color::Yellow;
 pub const FAIL: Color = Color::Red;
@@ -53,7 +53,6 @@ pub fn drift_arrow() -> Span<'static> {
 }
 
 /// Modal/dialog title span. Bold + TEXT — emphasis from weight, not color.
-/// ACCENT is reserved for selection/focus and must not appear on chrome.
 pub fn modal_title(text: &str) -> Span<'static> {
     Span::styled(
         format!(" {text} "),
@@ -70,7 +69,6 @@ mod tests {
     fn tokens_have_expected_colors() {
         assert_eq!(TEXT, Color::Reset);
         assert_eq!(DIM, Color::DarkGray);
-        assert_eq!(ACCENT, Color::Cyan);
         assert_eq!(OK, Color::Green);
         assert_eq!(BUSY, Color::Yellow);
         assert_eq!(FAIL, Color::Red);
@@ -155,13 +153,12 @@ mod tests {
     }
 
     #[test]
-    fn modal_title_is_bold_text_not_accent() {
+    fn modal_title_is_bold_text() {
         let span = modal_title("New Agent");
         assert_eq!(span.content, " New Agent ");
         assert_eq!(
             span.style,
             Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
         );
-        assert_ne!(span.style.fg, Some(ACCENT));
     }
 }
