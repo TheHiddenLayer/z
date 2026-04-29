@@ -8,7 +8,7 @@ use ratatui::{
 use crate::app::{App, Mode};
 use crate::agent::{Agent, AgentStatus};
 
-use crate::style::{ACCENT, DIM, TEXT, drift_arrow, footer_hint, modal_title, status_color};
+use crate::style::{DIM, TEXT, drift_arrow, footer_hint, modal_title, status_color};
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
 
