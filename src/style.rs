@@ -52,6 +52,15 @@ pub fn drift_arrow() -> Span<'static> {
     Span::styled(" \u{2192} ", Style::default().fg(DIM))
 }
 
+/// Modal/dialog title span. Bold + TEXT — emphasis from weight, not color.
+/// ACCENT is reserved for selection/focus and must not appear on chrome.
+pub fn modal_title(text: &str) -> Span<'static> {
+    Span::styled(
+        format!(" {text} "),
+        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +152,16 @@ mod tests {
         assert_eq!(span.content, " \u{2192} ");
         assert_eq!(span.style, Style::default().fg(DIM));
         assert_ne!(span.style.fg, Some(BUSY));
+    }
+
+    #[test]
+    fn modal_title_is_bold_text_not_accent() {
+        let span = modal_title("New Agent");
+        assert_eq!(span.content, " New Agent ");
+        assert_eq!(
+            span.style,
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        );
+        assert_ne!(span.style.fg, Some(ACCENT));
     }
 }

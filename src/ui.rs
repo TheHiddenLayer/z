@@ -8,7 +8,7 @@ use ratatui::{
 use crate::app::{App, Mode};
 use crate::agent::{Agent, AgentStatus};
 
-use crate::style::{ACCENT, DIM, TEXT, drift_arrow, footer_hint, status_color};
+use crate::style::{ACCENT, DIM, TEXT, drift_arrow, footer_hint, modal_title, status_color};
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
 
@@ -330,7 +330,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(DIM))
-        .title(Span::styled(" New Agent ", Style::default().fg(ACCENT)));
+        .title(modal_title("New Agent"));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -550,7 +550,7 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(DIM))
-        .title(Span::styled(" Delete Agent ", Style::default().fg(ACCENT)));
+        .title(modal_title("Delete Agent"));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
