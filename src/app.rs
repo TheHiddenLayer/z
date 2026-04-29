@@ -925,6 +925,12 @@ impl App {
                 KeyCode::Down if matches!(focus, NewAgentFocus::BranchList) => {
                     Some(Action::PickerNext)
                 }
+                KeyCode::Char('k') if matches!(focus, NewAgentFocus::BranchList) => {
+                    Some(Action::PickerPrev)
+                }
+                KeyCode::Char('j') if matches!(focus, NewAgentFocus::BranchList) => {
+                    Some(Action::PickerNext)
+                }
                 // Text fields: Name, Prompt
                 KeyCode::Backspace if matches!(focus, NewAgentFocus::Prompt | NewAgentFocus::Name) => {
                     Some(Action::TypeBackspace)
@@ -2853,5 +2859,48 @@ mod tests {
 
         // New status (Running) wins.
         assert!(matches!(app.agents[0].status, AgentStatus::Running));
+    }
+
+    #[test]
+    fn newagent_branchlist_k_moves_up() {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+        app.update(Action::FocusNext); // Repo
+        app.update(Action::FocusNext); // BranchToggle
+        app.update(Action::FocusNext); // BranchList
+        let action = app.handle_key(make_key(KeyCode::Char('k')));
+        assert!(matches!(action, Some(Action::PickerPrev)));
+    }
+
+    #[test]
+    fn newagent_branchlist_j_moves_down() {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+        app.update(Action::FocusNext);
+        app.update(Action::FocusNext);
+        app.update(Action::FocusNext); // BranchList
+        let action = app.handle_key(make_key(KeyCode::Char('j')));
+        assert!(matches!(action, Some(Action::PickerNext)));
+    }
+
+    #[test]
+    fn newagent_prompt_j_still_types() {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+        // Walk all the way to Prompt — count FocusNext calls to land there.
+        // Order is Agent → Repo → BranchToggle → BranchList → Name → Prompt
+        // (Name is skipped if BranchMode::Existing). Default is BranchMode::New.
+        for _ in 0..5 {
+            app.update(Action::FocusNext);
+        }
+        // Sanity: confirm we're on Prompt before testing the binding.
+        if let Mode::NewAgent { focus, .. } = &app.mode {
+            assert!(
+                matches!(focus, NewAgentFocus::Prompt),
+                "test setup: expected Prompt focus, got {focus:?}"
+            );
+        }
+        let action = app.handle_key(make_key(KeyCode::Char('j')));
+        assert!(matches!(action, Some(Action::TypeChar('j'))));
     }
 }
