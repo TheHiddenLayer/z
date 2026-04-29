@@ -25,7 +25,6 @@ enum Event {
     Resize,
     Focus(bool),
     Tick,
-    Render,
 }
 
 /// Manages the event-producing background task.
@@ -44,17 +43,11 @@ impl EventHandle {
             let mut reader = EventStream::new();
             let mut tick = tokio::time::interval(Duration::from_millis(100));
             tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            let mut render = tokio::time::interval(Duration::from_millis(33));
-            render.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
             loop {
-                let tick_fut = tick.tick();
-                let render_fut = render.tick();
-                let event_fut = reader.next();
-
                 tokio::select! {
                     _ = cancel_clone.cancelled() => break,
-                    maybe_event = event_fut => {
+                    maybe_event = reader.next() => {
                         if let Some(Ok(evt)) = maybe_event {
                             let mapped = match evt {
                                 crossterm::event::Event::Key(key) => Some(Event::Key(key)),
@@ -67,11 +60,8 @@ impl EventHandle {
                                 && tx.send(e).is_err() { break; }
                         }
                     }
-                    _ = tick_fut => {
+                    _ = tick.tick() => {
                         if tx.send(Event::Tick).is_err() { break; }
-                    }
-                    _ = render_fut => {
-                        if tx.send(Event::Render).is_err() { break; }
                     }
                 }
             }
@@ -239,6 +229,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut events = EventHandle::new();
 
+    // Paint the first frame immediately so startup feels instant.
+    terminal.draw(|f| ui::draw(f, &app))?;
+    app.dirty = false;
+
     loop {
         tokio::select! {
             Some(event) = events.rx.recv() => {
@@ -266,12 +260,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             execute(cmd, &action_tx);
                         }
                     }
-                    Event::Render => {
-                        if app.dirty {
-                            terminal.draw(|f| ui::draw(f, &app))?;
-                            app.dirty = false;
-                        }
-                    }
                 }
             }
             Some(action) = action_rx.recv() => {
@@ -283,6 +271,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if app.should_quit {
             break;
+        }
+
+        // Render synchronously after each event/action. This removes the
+        // ~33ms latency floor that a separate render ticker imposed on every
+        // keystroke, while keeping ratatui's back-buffer diff to minimize
+        // actual terminal traffic.
+        if app.dirty {
+            terminal.draw(|f| ui::draw(f, &app))?;
+            app.dirty = false;
         }
     }
 
@@ -333,13 +330,6 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                 let _ = tx.send(Action::BranchesLoaded { branches });
             });
         }
-        Command::CapturePreview { session, generation } => {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let content = agent::capture_pane(&session).await;
-                let _ = tx.send(Action::PreviewUpdated { content, generation });
-            });
-        }
         Command::CaptureActivity { session_name } => {
             let tx = tx.clone();
             tokio::spawn(async move {
@@ -355,6 +345,7 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                     let content_hash = h.finish();
                     let _ = tx.send(Action::ActivityCaptured {
                         session_name,
+                        content: Some(content),
                         content_hash,
                         attached_count,
                     });
