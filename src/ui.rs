@@ -502,7 +502,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         let placeholder = if is_prompt {
             Line::from(vec![
                 Span::raw(" ".repeat(label_w as usize)),
-                Span::styled("_", Style::default().fg(ACCENT)),
+                Span::styled("_", Style::default().fg(TEXT)),
             ])
         } else {
             Line::from(vec![
@@ -520,7 +520,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
             .sum();
         let scroll = line_count.saturating_sub(prompt_area.height);
         let paragraph = Paragraph::new(text)
-            .style(Style::default().fg(if is_prompt { ACCENT } else { TEXT }))
+            .style(Style::default().fg(TEXT))
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0));
         frame.render_widget(paragraph, prompt_area);
