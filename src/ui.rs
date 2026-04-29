@@ -382,25 +382,22 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     let val_style = |_focused: bool| Style::default().fg(TEXT);
 
     // Picker row: "│ Label    value" when focused, "  Label    value" when not.
-    // Replaces the old "‹ value ›" arrow chrome — selection is now expressed
-    // by the left bar + ACCENT, the same way every other list in z does it.
+    // Selection is encoded by the left bar plus brightness contrast on the
+    // label (TEXT focused, DIM unfocused). Value text stays TEXT regardless —
+    // it's content, not a focus indicator.
     let picker_row = |label: &str, value: &str, focused: bool| -> Line<'static> {
         let indicator = if focused { "\u{2502} " } else { "  " };
         let indicator_style = if focused {
-            Style::default().fg(ACCENT)
+            Style::default().fg(TEXT)
         } else {
             Style::default()
         };
         let label_style = if focused {
-            Style::default().fg(ACCENT)
+            Style::default().fg(TEXT)
         } else {
             Style::default().fg(DIM)
         };
-        let value_style = if focused {
-            Style::default().fg(ACCENT)
-        } else {
-            Style::default().fg(TEXT)
-        };
+        let value_style = Style::default().fg(TEXT);
         let label_field_w = label_w as usize;
         // Label occupies the label column; value starts at column label_w + 2.
         let label_padding = label_field_w.saturating_sub(label.len() + 2);
