@@ -377,11 +377,9 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     let label_w = 14u16;
     let label_style = |focused: bool| {
-        if focused { Style::default().fg(ACCENT) } else { Style::default().fg(DIM) }
+        if focused { Style::default().fg(TEXT) } else { Style::default().fg(DIM) }
     };
-    let val_style = |focused: bool| {
-        if focused { Style::default().fg(ACCENT) } else { Style::default().fg(TEXT) }
-    };
+    let val_style = |_focused: bool| Style::default().fg(TEXT);
 
     // Picker row: "│ Label    value" when focused, "  Label    value" when not.
     // Replaces the old "‹ value ›" arrow chrome — selection is now expressed
