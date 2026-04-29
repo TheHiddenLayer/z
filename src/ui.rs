@@ -601,23 +601,15 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(msg3), chunks[3]);
 
     let hint = if has_session {
-        Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled("y", Style::default().fg(ACCENT)),
-            Span::styled(" delete + tmux  ", Style::default().fg(DIM)),
-            Span::styled("p", Style::default().fg(ACCENT)),
-            Span::styled(" preserve tmux  ", Style::default().fg(DIM)),
-            Span::styled("esc", Style::default().fg(ACCENT)),
-            Span::styled(" cancel", Style::default().fg(DIM)),
+        footer_hint(&[
+            ("y", "delete + tmux"),
+            ("p", "preserve tmux"),
+            ("esc", "cancel"),
         ])
     } else {
-        Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled("y", Style::default().fg(ACCENT)),
-            Span::styled(" confirm  ", Style::default().fg(DIM)),
-            Span::styled("esc", Style::default().fg(ACCENT)),
-            Span::styled(" cancel", Style::default().fg(DIM)),
-        ])
+        footer_hint(&[("y", "delete"), ("esc", "cancel")])
     };
-    frame.render_widget(Paragraph::new(hint), chunks[5]);
+    let mut spans = vec![Span::raw("  ")];
+    spans.extend(hint.spans);
+    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[5]);
 }
