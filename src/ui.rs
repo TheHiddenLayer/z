@@ -234,7 +234,7 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
         let dim_style = Style::default().fg(DIM);
         let mut spans = vec![Span::styled(" ", dim_style)];
         for (i, agent) in app.agents.iter().enumerate() {
-            let glyph = if i == app.selected { "\u{25CF}" } else { "\u{00B7}" };
+            let glyph = if i == app.selected { "\u{25CF}" } else { "\u{2022}" };
             let style = Style::default().fg(status_color(agent));
             spans.push(Span::styled(glyph, style));
             if i + 1 < total {
