@@ -298,7 +298,7 @@ impl App {
         self.merge_requests.get(self.selected_mr)
     }
 
-    fn agent_matches_mr(agent: &Agent, mr: &MergeRequest) -> bool {
+    pub(crate) fn agent_matches_mr(agent: &Agent, mr: &MergeRequest) -> bool {
         let repo_matches = if mr.repo_path.as_os_str().is_empty() {
             agent.repo_name == mr.repo_name
         } else {
@@ -817,6 +817,14 @@ impl App {
                     .fresh(&agent_name, None)
                     .expect("default_agent is validated to exist in agents");
                 let session_name = agent::session_name(&mr.repo_name, &mr.source_branch);
+                if self
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_name == session_name)
+                {
+                    self.status_message = Some(format!("Session already exists: {session_name}"));
+                    return cmds;
+                }
                 let slug = mr.source_branch.replace('/', "-");
 
                 self.agents.push(Agent {
@@ -2100,6 +2108,31 @@ mod tests {
             &cmds[0],
             Command::PrepareAttach { agent, .. } if agent.repo_path == repos[1]
         ));
+    }
+
+    #[test]
+    fn launch_selected_mr_blocks_session_name_collision_across_duplicate_repo_names() {
+        let mut app = test_app_with_repos(&["~/src/team-a/myapp", "~/src/team-b/myapp"]);
+        let repos = app.config.resolved_repos();
+        app.view = View::MergeRequests;
+        app.merge_requests = vec![mock_merge_request_with_repo_path(
+            "myapp",
+            repos[1].clone(),
+            "feature/a",
+            1,
+        )];
+        let mut other_repo_agent = mock_agent("feature/a");
+        other_repo_agent.repo_path = repos[0].clone();
+        app.agents = vec![other_repo_agent];
+
+        let cmds = app.update(Action::LaunchSelectedMergeRequest);
+
+        assert!(cmds.is_empty());
+        assert_eq!(app.agents.len(), 1);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Session already exists: z-myapp-feature-a")
+        );
     }
 
     #[test]

@@ -246,7 +246,7 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
 fn matching_agent_for_mr<'a>(app: &'a App, mr: &MergeRequest) -> Option<&'a Agent> {
     app.agents
         .iter()
-        .find(|a| a.repo_name == mr.repo_name && a.branch == mr.source_branch)
+        .find(|agent| App::agent_matches_mr(agent, mr))
 }
 
 fn draw_merge_request_table(frame: &mut Frame, app: &App, area: Rect) {
@@ -837,7 +837,52 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scm::MergeRequestState;
+    use crate::agent::{Agent, AgentStatus};
+    use crate::config::Config;
+    use crate::scm::{MergeRequest, MergeRequestState};
+
+    fn test_app_with_agents(agents: Vec<Agent>) -> App {
+        let config =
+            Config::from_toml_str(r#"repos = ["~/src/team-a/myapp", "~/src/team-b/myapp"]"#)
+                .unwrap();
+        let mut app = App::new(config);
+        app.agents = agents;
+        app
+    }
+
+    fn mock_agent(repo_path: &str, branch: &str) -> Agent {
+        let slug = branch.replace('/', "-");
+        Agent {
+            repo_path: repo_path.into(),
+            repo_name: "myapp".into(),
+            branch: branch.into(),
+            base_branch: None,
+            worktree_path: format!("{repo_path}-worktrees/{branch}").into(),
+            slug: slug.clone(),
+            session_name: format!("z-myapp-{slug}"),
+            status: AgentStatus::Running,
+            agent_name: "codex".into(),
+            last_pane_hash: None,
+            last_attached_count: Some(0),
+            quiet_captures: 0,
+            seen_activity_since_seed: false,
+            was_spinner_visible: false,
+            consecutive_emits: 0,
+        }
+    }
+
+    fn mock_merge_request(repo_path: &str, branch: &str) -> MergeRequest {
+        MergeRequest {
+            repo_name: "myapp".into(),
+            repo_path: repo_path.into(),
+            iid: 1,
+            title: "MR 1".into(),
+            source_branch: branch.into(),
+            target_branch: "main".into(),
+            web_url: "https://gitlab.example.com/team/myapp/-/merge_requests/1".into(),
+            state: MergeRequestState::Ready,
+        }
+    }
 
     #[test]
     fn mr_state_labels_are_short() {
@@ -846,5 +891,21 @@ mod tests {
         assert_eq!(mr_state_label(MergeRequestState::Review), "review");
         assert_eq!(mr_state_label(MergeRequestState::Ready), "ready");
         assert_eq!(mr_state_label(MergeRequestState::Unknown), "unknown");
+    }
+
+    #[test]
+    fn matching_agent_for_mr_uses_exact_repo_path_when_present() {
+        let app = test_app_with_agents(vec![
+            mock_agent("/Users/me/src/team-a/myapp", "feature/a"),
+            mock_agent("/Users/me/src/team-b/myapp", "feature/a"),
+        ]);
+        let mr = mock_merge_request("/Users/me/src/team-b/myapp", "feature/a");
+
+        let agent = matching_agent_for_mr(&app, &mr).unwrap();
+
+        assert_eq!(
+            agent.repo_path,
+            std::path::PathBuf::from("/Users/me/src/team-b/myapp")
+        );
     }
 }
