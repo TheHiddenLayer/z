@@ -447,15 +447,13 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                     match scm::scm_repo_from_path(&repo_path).await {
                         Ok(repo) => match provider.list_open_merge_requests(&repo).await {
                             Ok(mut mrs) => all.append(&mut mrs),
-                            Err(err) => errors.push(err.to_string()),
+                            Err(err) => errors.push(format!("{}: {err}", repo.name)),
                         },
-                        Err(err) => errors.push(err.to_string()),
+                        Err(err) => errors.push(format!("{}: {err}", repo_path.display())),
                     }
                 }
 
-                if !all.is_empty() || errors.is_empty() {
-                    let _ = tx.send(Action::MergeRequestsRefreshed(all));
-                }
+                let _ = tx.send(Action::MergeRequestsRefreshed(all));
                 if !errors.is_empty() {
                     let _ = tx.send(Action::MergeRequestsFailed(errors.join("; ")));
                 }
@@ -575,5 +573,33 @@ mod tests {
     #[test]
     fn parse_unknown_command() {
         assert!(parse_args(&args(&["whoops"])).is_err());
+    }
+
+    #[tokio::test]
+    async fn refresh_merge_requests_clears_rows_before_reporting_errors() {
+        let repo_path = std::path::PathBuf::from("/definitely/not/a/git/repo/for-z-flow-tests");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        execute(Command::RefreshMergeRequests(vec![repo_path.clone()]), &tx);
+
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("refresh action timed out")
+            .expect("refresh action channel closed");
+        match first {
+            Action::MergeRequestsRefreshed(mrs) => assert!(mrs.is_empty()),
+            other => panic!("expected refreshed action first, got {other:?}"),
+        }
+
+        let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("failure action timed out")
+            .expect("failure action channel closed");
+        match second {
+            Action::MergeRequestsFailed(error) => {
+                assert!(error.contains(&repo_path.display().to_string()));
+            }
+            other => panic!("expected failure action second, got {other:?}"),
+        }
     }
 }
