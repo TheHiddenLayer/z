@@ -327,6 +327,22 @@ impl App {
         })
     }
 
+    fn session_name_conflicts_for_mr(&self, mr: &MergeRequest, session_name: &str) -> bool {
+        let mut exact_matches = 0;
+        for agent in self
+            .agents
+            .iter()
+            .filter(|agent| agent.session_name == session_name)
+        {
+            if Self::agent_matches_mr(agent, mr) {
+                exact_matches += 1;
+            } else {
+                return true;
+            }
+        }
+        exact_matches > 1
+    }
+
     fn refresh_merge_requests_command(&mut self) -> Command {
         self.mr_refresh_generation = self.mr_refresh_generation.wrapping_add(1);
         Command::RefreshMergeRequests {
@@ -783,6 +799,11 @@ impl App {
                 };
 
                 if let Some(agent) = self.agent_matching_mr(&mr) {
+                    if self.session_name_conflicts_for_mr(&mr, &agent.session_name) {
+                        self.status_message =
+                            Some(format!("Session already exists: {}", agent.session_name));
+                        return cmds;
+                    }
                     match agent.status {
                         AgentStatus::Running => {
                             cmds.push(Command::Attach(agent));
@@ -817,11 +838,7 @@ impl App {
                     .fresh(&agent_name, None)
                     .expect("default_agent is validated to exist in agents");
                 let session_name = agent::session_name(&mr.repo_name, &mr.source_branch);
-                if self
-                    .agents
-                    .iter()
-                    .any(|agent| agent.session_name == session_name)
-                {
+                if self.session_name_conflicts_for_mr(&mr, &session_name) {
                     self.status_message = Some(format!("Session already exists: {session_name}"));
                     return cmds;
                 }
@@ -2108,6 +2125,33 @@ mod tests {
             &cmds[0],
             Command::PrepareAttach { agent, .. } if agent.repo_path == repos[1]
         ));
+    }
+
+    #[test]
+    fn launch_selected_mr_blocks_ambiguous_existing_session_name() {
+        let mut app = test_app_with_repos(&["~/src/team-a/myapp", "~/src/team-b/myapp"]);
+        let repos = app.config.resolved_repos();
+        app.view = View::MergeRequests;
+        app.merge_requests = vec![mock_merge_request_with_repo_path(
+            "myapp",
+            repos[1].clone(),
+            "feature/a",
+            1,
+        )];
+        let mut wrong_repo_agent = mock_agent("feature/a");
+        wrong_repo_agent.repo_path = repos[0].clone();
+        let mut right_repo_agent = mock_agent("feature/a");
+        right_repo_agent.repo_path = repos[1].clone();
+        right_repo_agent.status = crate::agent::AgentStatus::Stopped;
+        app.agents = vec![wrong_repo_agent, right_repo_agent];
+
+        let cmds = app.update(Action::LaunchSelectedMergeRequest);
+
+        assert!(cmds.is_empty());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Session already exists: z-myapp-feature-a")
+        );
     }
 
     #[test]
