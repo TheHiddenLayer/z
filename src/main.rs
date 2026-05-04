@@ -2,6 +2,7 @@ mod config;
 mod agent;
 mod app;
 mod notifications;
+mod scm;
 mod style;
 mod ui;
 
