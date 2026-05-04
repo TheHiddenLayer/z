@@ -671,11 +671,18 @@ impl App {
                 };
 
                 if let Some(agent) = self.agent_matching_mr(&mr) {
-                    if agent.status.has_session() {
-                        cmds.push(Command::Attach(agent));
-                    } else {
-                        self.status_message = Some(format!("Starting: {}", agent.branch));
-                        cmds.push(self.prepare_attach_command(agent));
+                    match agent.status {
+                        AgentStatus::Running => {
+                            cmds.push(Command::Attach(agent));
+                        }
+                        AgentStatus::Creating => {
+                            self.status_message =
+                                Some(format!("Already starting: {}", agent.branch));
+                        }
+                        AgentStatus::Stopped | AgentStatus::Error(_) => {
+                            self.status_message = Some(format!("Starting: {}", agent.branch));
+                            cmds.push(self.prepare_attach_command(agent));
+                        }
                     }
                     return cmds;
                 }
@@ -1692,6 +1699,25 @@ mod tests {
     }
 
     #[test]
+    fn launch_selected_mr_ignores_matching_creating_agent() {
+        let mut app = test_app();
+        app.view = View::MergeRequests;
+        app.merge_requests = vec![mock_merge_request("myapp", "feature/a", 1)];
+        let mut agent = mock_agent_creating("feature/a");
+        agent.worktree_path = PathBuf::new();
+        app.agents = vec![agent];
+
+        let cmds = app.update(Action::LaunchSelectedMergeRequest);
+
+        assert!(cmds.is_empty());
+        assert_eq!(app.agents.len(), 1);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Already starting: feature/a")
+        );
+    }
+
+    #[test]
     fn launch_selected_mr_creates_existing_branch_agent_when_no_local_agent_exists() {
         let mut app = test_app();
         app.view = View::MergeRequests;
@@ -1711,6 +1737,32 @@ mod tests {
                 ..
             } if branch == "feature/a"
         ));
+    }
+
+    #[test]
+    fn launch_selected_mr_without_selection_sets_status() {
+        let mut app = test_app();
+        app.view = View::MergeRequests;
+
+        let cmds = app.update(Action::LaunchSelectedMergeRequest);
+
+        assert!(cmds.is_empty());
+        assert_eq!(app.status_message.as_deref(), Some("No merge request selected"));
+    }
+
+    #[test]
+    fn launch_selected_mr_with_unconfigured_repo_sets_status() {
+        let mut app = test_app();
+        app.view = View::MergeRequests;
+        app.merge_requests = vec![mock_merge_request("other", "feature/a", 1)];
+
+        let cmds = app.update(Action::LaunchSelectedMergeRequest);
+
+        assert!(cmds.is_empty());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Repo not configured: other")
+        );
     }
 
     #[test]
