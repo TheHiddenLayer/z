@@ -186,12 +186,49 @@ impl ScmProvider for GitLabScm {
 }
 
 pub fn repo_name_from_path(path: &Path) -> ScmResult<String> {
-    path.file_name()
+    if let Some(name) = path
+        .file_name()
         .and_then(|name| name.to_str())
         .map(ToString::to_string)
-        .ok_or_else(|| ScmError::RemoteUrlMissing {
-            repo_name: path.display().to_string(),
-        })
+    {
+        return Ok(name);
+    }
+
+    if path_is_current_dir(path) {
+        return std::env::current_dir()
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(ToString::to_string)
+            })
+            .ok_or_else(|| ScmError::RemoteUrlMissing {
+                repo_name: path.display().to_string(),
+            });
+    }
+
+    Err(ScmError::RemoteUrlMissing {
+        repo_name: path.display().to_string(),
+    })
+}
+
+fn path_is_current_dir(path: &Path) -> bool {
+    let mut components = path.components();
+    matches!(components.next(), Some(std::path::Component::CurDir))
+        && components.all(|component| matches!(component, std::path::Component::CurDir))
+}
+
+fn git_remote_get_url_error(repo_name: &str, stderr: String) -> ScmError {
+    if stderr.contains("No such remote") {
+        ScmError::RemoteUrlMissing {
+            repo_name: repo_name.to_string(),
+        }
+    } else {
+        ScmError::CommandFailed {
+            command: "git remote get-url origin".to_string(),
+            stderr,
+        }
+    }
 }
 
 pub async fn scm_repo_from_path(path: &Path) -> ScmResult<ScmRepo> {
@@ -208,7 +245,10 @@ pub async fn scm_repo_from_path(path: &Path) -> ScmResult<ScmRepo> {
         })?;
 
     if !output.status.success() {
-        return Err(ScmError::RemoteUrlMissing { repo_name: name });
+        return Err(git_remote_get_url_error(
+            &name,
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
     }
 
     let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -365,6 +405,51 @@ mod tests {
     fn repo_name_from_path_uses_directory_name() {
         let path = std::path::Path::new("/tmp/work/myapp");
         assert_eq!(repo_name_from_path(path).unwrap(), "myapp");
+    }
+
+    #[test]
+    fn repo_name_from_dot_uses_current_directory_name() {
+        let expected = std::env::current_dir()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        assert_eq!(
+            repo_name_from_path(std::path::Path::new(".")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            repo_name_from_path(std::path::Path::new("./")).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn non_missing_origin_git_error_maps_to_command_failed() {
+        let err = git_remote_get_url_error("app", "fatal: not a git repository\n".to_string());
+
+        assert_eq!(
+            err,
+            ScmError::CommandFailed {
+                command: "git remote get-url origin".to_string(),
+                stderr: "fatal: not a git repository\n".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn missing_origin_git_error_maps_to_remote_url_missing() {
+        let err = git_remote_get_url_error("app", "error: No such remote 'origin'\n".to_string());
+
+        assert_eq!(
+            err,
+            ScmError::RemoteUrlMissing {
+                repo_name: "app".to_string(),
+            }
+        );
     }
 
     #[test]
