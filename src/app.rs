@@ -267,6 +267,37 @@ impl App {
         self.merge_requests.get(self.selected_mr)
     }
 
+    fn agent_matching_mr(&self, mr: &MergeRequest) -> Option<Agent> {
+        self.agents
+            .iter()
+            .find(|a| a.repo_name == mr.repo_name && a.branch == mr.source_branch)
+            .cloned()
+    }
+
+    fn repo_path_for_mr(&self, mr: &MergeRequest) -> Option<PathBuf> {
+        self.config.resolved_repos().into_iter().find(|repo| {
+            repo.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == mr.repo_name)
+        })
+    }
+
+    fn prepare_attach_command(&mut self, agent: Agent) -> Command {
+        let resume_cmd = match self.config.resume(&agent.agent_name) {
+            Some(cmd) => cmd,
+            None => {
+                self.status_message = Some(format!(
+                    "agent '{}' not in config \u{2014} using default",
+                    agent.agent_name
+                ));
+                self.config
+                    .resume(self.config.default_agent_name())
+                    .expect("default_agent is validated to exist in agents")
+            }
+        };
+        Command::PrepareAttach { agent, resume_cmd }
+    }
+
     /// Activity capture for the selected session, used to repaint the preview
     /// pane immediately after navigation. The same Command type that the Tick
     /// loop fires periodically — its content lands in `preview_content` when
@@ -616,28 +647,10 @@ impl App {
                     if agent.status.has_session() {
                         cmds.push(Command::Attach(agent));
                     } else {
-                        // Spawn session creation off the main loop so the
-                        // UI stays responsive while tmux warms up. Resolve
-                        // the resume command here so the spawn doesn't need
-                        // access to Config; if the stored agent name isn't
-                        // in the current config, fall back to the default
-                        // and surface a non-fatal warning.
-                        let resume_cmd = match self.config.resume(&agent.agent_name) {
-                            Some(cmd) => cmd,
-                            None => {
-                                self.status_message = Some(format!(
-                                    "agent '{}' not in config \u{2014} using default",
-                                    agent.agent_name
-                                ));
-                                self.config
-                                    .resume(self.config.default_agent_name())
-                                    .expect("default_agent is validated to exist in agents")
-                            }
-                        };
                         if self.status_message.is_none() {
                             self.status_message = Some(format!("Starting: {}", agent.branch));
                         }
-                        cmds.push(Command::PrepareAttach { agent, resume_cmd });
+                        cmds.push(self.prepare_attach_command(agent));
                     }
                 }
             }
@@ -651,7 +664,63 @@ impl App {
             Action::RefreshMergeRequests => {
                 cmds.push(Command::RefreshMergeRequests(self.config.resolved_repos()));
             }
-            Action::LaunchSelectedMergeRequest => {}
+            Action::LaunchSelectedMergeRequest => {
+                let Some(mr) = self.selected_merge_request().cloned() else {
+                    self.status_message = Some("No merge request selected".into());
+                    return cmds;
+                };
+
+                if let Some(agent) = self.agent_matching_mr(&mr) {
+                    if agent.status.has_session() {
+                        cmds.push(Command::Attach(agent));
+                    } else {
+                        self.status_message = Some(format!("Starting: {}", agent.branch));
+                        cmds.push(self.prepare_attach_command(agent));
+                    }
+                    return cmds;
+                }
+
+                let Some(repo) = self.repo_path_for_mr(&mr) else {
+                    self.status_message = Some(format!("Repo not configured: {}", mr.repo_name));
+                    return cmds;
+                };
+
+                let agent_name = self.config.default_agent_name().to_string();
+                let fresh_cmd = self
+                    .config
+                    .fresh(&agent_name, None)
+                    .expect("default_agent is validated to exist in agents");
+                let session_name = agent::session_name(&mr.repo_name, &mr.source_branch);
+                let slug = mr.source_branch.replace('/', "-");
+
+                self.agents.push(Agent {
+                    repo_path: repo.clone(),
+                    repo_name: mr.repo_name.clone(),
+                    branch: mr.source_branch.clone(),
+                    base_branch: Some(mr.target_branch.clone()),
+                    worktree_path: PathBuf::new(),
+                    slug,
+                    session_name: session_name.clone(),
+                    status: AgentStatus::Creating,
+                    agent_name: agent_name.clone(),
+                    last_pane_hash: None,
+                    last_attached_count: None,
+                    quiet_captures: 0,
+                    seen_activity_since_seed: false,
+                    was_spinner_visible: false,
+                    consecutive_emits: 0,
+                });
+
+                cmds.push(Command::CreateAgent {
+                    repo,
+                    branch: mr.source_branch,
+                    new_branch: false,
+                    base_branch: None,
+                    session_name,
+                    agent_name,
+                    fresh_cmd,
+                });
+            }
 
             // --- Background results ---
             Action::AgentReady { branch, session, worktree_path } => {
@@ -1592,6 +1661,56 @@ mod tests {
 
         assert_eq!(app.selected, 1);
         assert_eq!(app.selected_mr, 1);
+    }
+
+    #[test]
+    fn launch_selected_mr_attaches_matching_running_agent() {
+        let mut app = test_app();
+        app.view = View::MergeRequests;
+        app.merge_requests = vec![mock_merge_request("myapp", "feature/a", 1)];
+        app.agents = vec![mock_agent("feature/a")];
+
+        let cmds = app.update(Action::LaunchSelectedMergeRequest);
+
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], Command::Attach(_)));
+    }
+
+    #[test]
+    fn launch_selected_mr_resumes_matching_stopped_agent() {
+        let mut app = test_app();
+        app.view = View::MergeRequests;
+        app.merge_requests = vec![mock_merge_request("myapp", "feature/a", 1)];
+        let mut agent = mock_agent("feature/a");
+        agent.status = crate::agent::AgentStatus::Stopped;
+        app.agents = vec![agent];
+
+        let cmds = app.update(Action::LaunchSelectedMergeRequest);
+
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], Command::PrepareAttach { .. }));
+    }
+
+    #[test]
+    fn launch_selected_mr_creates_existing_branch_agent_when_no_local_agent_exists() {
+        let mut app = test_app();
+        app.view = View::MergeRequests;
+        app.merge_requests = vec![mock_merge_request("myapp", "feature/a", 1)];
+
+        let cmds = app.update(Action::LaunchSelectedMergeRequest);
+
+        assert_eq!(app.agents.len(), 1);
+        assert_eq!(app.agents[0].branch, "feature/a");
+        assert!(matches!(app.agents[0].status, crate::agent::AgentStatus::Creating));
+        assert!(matches!(
+            &cmds[0],
+            Command::CreateAgent {
+                branch,
+                new_branch: false,
+                base_branch: None,
+                ..
+            } if branch == "feature/a"
+        ));
     }
 
     #[test]
