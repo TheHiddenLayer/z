@@ -21,6 +21,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use app::{Action, App, Command};
+use scm::ScmProvider;
 
 /// Events produced by the dedicated event-reading task.
 enum Event {
@@ -435,10 +436,32 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                 let _ = tx.send(Action::AttachReady(agent));
             });
         }
-        Command::Attach(_) => unreachable!("Attach handled by dispatch"),
         Command::RefreshMergeRequests(repos) => {
-            let _ = repos.len();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let provider = scm::GitLabScm;
+                let mut all = Vec::new();
+                let mut errors = Vec::new();
+
+                for repo_path in repos {
+                    match scm::scm_repo_from_path(&repo_path).await {
+                        Ok(repo) => match provider.list_open_merge_requests(&repo).await {
+                            Ok(mut mrs) => all.append(&mut mrs),
+                            Err(err) => errors.push(err.to_string()),
+                        },
+                        Err(err) => errors.push(err.to_string()),
+                    }
+                }
+
+                if !all.is_empty() || errors.is_empty() {
+                    let _ = tx.send(Action::MergeRequestsRefreshed(all));
+                }
+                if !errors.is_empty() {
+                    let _ = tx.send(Action::MergeRequestsFailed(errors.join("; ")));
+                }
+            });
         }
+        Command::Attach(_) => unreachable!("Attach handled by dispatch"),
     }
 }
 
