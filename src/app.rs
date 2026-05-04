@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::agent::{self, Agent, AgentStatus};
 use crate::config::Config;
 use crate::notifications;
+use crate::scm::MergeRequest;
 
 fn chrono_free_date_str() -> String {
     let now = SystemTime::now()
@@ -42,6 +43,7 @@ pub enum Action {
     StartDelete,
     CancelMode,
     ToggleHelp,
+    ToggleView,
 
     // New agent flow
     PickerNext,
@@ -58,6 +60,8 @@ pub enum Action {
     Attach,
     AttachReady(Agent),
     RefreshAgents,
+    RefreshMergeRequests,
+    LaunchSelectedMergeRequest,
 
     // Background results (pure state updates)
     AgentReady {
@@ -87,6 +91,8 @@ pub enum Action {
     BranchesLoaded {
         branches: Vec<String>,
     },
+    MergeRequestsRefreshed(Vec<MergeRequest>),
+    MergeRequestsFailed(String),
 
     // System
     Tick,
@@ -147,6 +153,7 @@ pub enum Command {
     },
     Attach(Agent),
     PrepareAttach { agent: Agent, resume_cmd: String },
+    RefreshMergeRequests(Vec<PathBuf>),
 }
 
 // --- Mode ---
@@ -169,6 +176,12 @@ pub enum Mode {
     ConfirmDelete,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum View {
+    Agents,
+    MergeRequests,
+}
+
 fn find_main_branch(branches: &[String]) -> usize {
     branches
         .iter()
@@ -182,6 +195,9 @@ fn find_main_branch(branches: &[String]) -> usize {
 pub struct App {
     pub agents: Vec<Agent>,
     pub selected: usize,
+    pub merge_requests: Vec<MergeRequest>,
+    pub selected_mr: usize,
+    pub view: View,
     pub mode: Mode,
     pub config: Config,
     pub should_quit: bool,
@@ -203,6 +219,9 @@ impl App {
         Self {
             agents: Vec::new(),
             selected: 0,
+            merge_requests: Vec::new(),
+            selected_mr: 0,
+            view: View::Agents,
             mode: Mode::Normal,
             config,
             should_quit: false,
@@ -244,6 +263,10 @@ impl App {
         self.agents.get(self.selected)
     }
 
+    pub fn selected_merge_request(&self) -> Option<&MergeRequest> {
+        self.merge_requests.get(self.selected_mr)
+    }
+
     /// Activity capture for the selected session, used to repaint the preview
     /// pane immediately after navigation. The same Command type that the Tick
     /// loop fires periodically — its content lands in `preview_content` when
@@ -282,26 +305,40 @@ impl App {
         }
         match action {
             // --- Navigation ---
-            Action::MoveUp => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                    // Honest blank > stale content: clear immediately and
-                    // wait for the new selection's capture to land.
-                    self.preview_content = None;
-                    if let Some(cmd) = self.capture_selected_command() {
-                        cmds.push(cmd);
+            Action::MoveUp => match self.view {
+                View::Agents => {
+                    if self.selected > 0 {
+                        self.selected -= 1;
+                        // Honest blank > stale content: clear immediately and
+                        // wait for the new selection's capture to land.
+                        self.preview_content = None;
+                        if let Some(cmd) = self.capture_selected_command() {
+                            cmds.push(cmd);
+                        }
                     }
                 }
-            }
-            Action::MoveDown => {
-                if self.selected + 1 < self.agents.len() {
-                    self.selected += 1;
-                    self.preview_content = None;
-                    if let Some(cmd) = self.capture_selected_command() {
-                        cmds.push(cmd);
+                View::MergeRequests => {
+                    if self.selected_mr > 0 {
+                        self.selected_mr -= 1;
                     }
                 }
-            }
+            },
+            Action::MoveDown => match self.view {
+                View::Agents => {
+                    if self.selected + 1 < self.agents.len() {
+                        self.selected += 1;
+                        self.preview_content = None;
+                        if let Some(cmd) = self.capture_selected_command() {
+                            cmds.push(cmd);
+                        }
+                    }
+                }
+                View::MergeRequests => {
+                    if self.selected_mr + 1 < self.merge_requests.len() {
+                        self.selected_mr += 1;
+                    }
+                }
+            },
 
             // --- Mode transitions ---
             Action::StartNewAgent => {
@@ -335,6 +372,15 @@ impl App {
             }
             Action::ToggleHelp => {
                 self.help_visible = !self.help_visible;
+            }
+            Action::ToggleView => {
+                self.view = match self.view {
+                    View::Agents => View::MergeRequests,
+                    View::MergeRequests => View::Agents,
+                };
+                if self.view == View::MergeRequests {
+                    cmds.push(Command::RefreshMergeRequests(self.config.resolved_repos()));
+                }
             }
 
             // --- Pickers ---
@@ -602,6 +648,10 @@ impl App {
                 self.discover_pending = true;
                 cmds.push(Command::Discover(self.config.resolved_repos()));
             }
+            Action::RefreshMergeRequests => {
+                cmds.push(Command::RefreshMergeRequests(self.config.resolved_repos()));
+            }
+            Action::LaunchSelectedMergeRequest => {}
 
             // --- Background results ---
             Action::AgentReady { branch, session, worktree_path } => {
@@ -760,6 +810,18 @@ impl App {
                     _ => {}
                 }
             }
+            Action::MergeRequestsRefreshed(mrs) => {
+                self.merge_requests = mrs;
+                if self.selected_mr >= self.merge_requests.len() && !self.merge_requests.is_empty() {
+                    self.selected_mr = self.merge_requests.len() - 1;
+                }
+                if self.merge_requests.is_empty() {
+                    self.selected_mr = 0;
+                }
+            }
+            Action::MergeRequestsFailed(error) => {
+                self.status_message = Some(format!("MR refresh: {error}"));
+            }
 
             // --- System ---
             Action::Tick => {
@@ -886,20 +948,33 @@ impl App {
         }
 
         match &self.mode {
-            Mode::Normal => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
-                KeyCode::Char('j') | KeyCode::Down => Some(Action::MoveDown),
-                KeyCode::Char('k') | KeyCode::Up => Some(Action::MoveUp),
-                KeyCode::Char('n') => Some(Action::StartNewAgent),
-                KeyCode::Char('a') | KeyCode::Enter => Some(Action::Attach),
-                KeyCode::Char('x') => {
-                    self.selected_agent()
-                        .filter(|a| a.status.has_session())
-                        .map(|a| Action::KillSession(a.session_name.clone()))
-                }
-                KeyCode::Char('d') => Some(Action::StartDelete),
-                KeyCode::Char('?') => Some(Action::ToggleHelp),
-                _ => None,
+            Mode::Normal => match self.view {
+                View::Agents => match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
+                    KeyCode::Char('j') | KeyCode::Down => Some(Action::MoveDown),
+                    KeyCode::Char('k') | KeyCode::Up => Some(Action::MoveUp),
+                    KeyCode::Char('m') => Some(Action::ToggleView),
+                    KeyCode::Char('n') => Some(Action::StartNewAgent),
+                    KeyCode::Char('a') | KeyCode::Enter => Some(Action::Attach),
+                    KeyCode::Char('x') => {
+                        self.selected_agent()
+                            .filter(|a| a.status.has_session())
+                            .map(|a| Action::KillSession(a.session_name.clone()))
+                    }
+                    KeyCode::Char('d') => Some(Action::StartDelete),
+                    KeyCode::Char('?') => Some(Action::ToggleHelp),
+                    _ => None,
+                },
+                View::MergeRequests => match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
+                    KeyCode::Char('j') | KeyCode::Down => Some(Action::MoveDown),
+                    KeyCode::Char('k') | KeyCode::Up => Some(Action::MoveUp),
+                    KeyCode::Char('m') => Some(Action::ToggleView),
+                    KeyCode::Char('r') => Some(Action::RefreshMergeRequests),
+                    KeyCode::Char('a') | KeyCode::Enter => Some(Action::LaunchSelectedMergeRequest),
+                    KeyCode::Char('?') => Some(Action::ToggleHelp),
+                    _ => None,
+                },
             },
             Mode::ConfirmDelete => match key.code {
                 KeyCode::Esc => Some(Action::CancelMode),
@@ -1452,10 +1527,80 @@ mod tests {
         }
     }
 
+    fn mock_merge_request(repo_name: &str, source_branch: &str, iid: u64) -> crate::scm::MergeRequest {
+        crate::scm::MergeRequest {
+            repo_name: repo_name.into(),
+            iid,
+            title: format!("MR {iid}"),
+            source_branch: source_branch.into(),
+            target_branch: "main".into(),
+            web_url: format!("https://gitlab.example.com/acme/{repo_name}/-/merge_requests/{iid}"),
+            state: crate::scm::MergeRequestState::Ready,
+        }
+    }
+
     fn mock_agent_creating(branch: &str) -> crate::agent::Agent {
         let mut a = mock_agent(branch);
         a.status = crate::agent::AgentStatus::Creating;
         a
+    }
+
+    #[test]
+    fn toggle_view_switches_to_merge_requests_and_requests_refresh() {
+        let mut app = test_app();
+        let cmds = app.update(Action::ToggleView);
+        assert_eq!(app.view, View::MergeRequests);
+        match cmds.as_slice() {
+            [Command::RefreshMergeRequests(repos)] => assert_eq!(repos.len(), 1),
+            other => panic!("expected MR refresh command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_requests_refreshed_stores_rows_and_clamps_selection() {
+        let mut app = test_app();
+        app.view = View::MergeRequests;
+        app.selected_mr = 9;
+        app.update(Action::MergeRequestsRefreshed(vec![
+            mock_merge_request("myapp", "feature/a", 1),
+            mock_merge_request("myapp", "feature/b", 2),
+        ]));
+        assert_eq!(app.merge_requests.len(), 2);
+        assert_eq!(app.selected_mr, 1);
+        assert_eq!(app.selected_merge_request().unwrap().iid, 2);
+    }
+
+    #[test]
+    fn mr_refresh_failure_sets_status_message() {
+        let mut app = test_app();
+        app.update(Action::MergeRequestsFailed("gitlab unavailable".into()));
+        assert_eq!(app.status_message.as_deref(), Some("MR refresh: gitlab unavailable"));
+    }
+
+    #[test]
+    fn mr_navigation_is_independent_of_agent_selection() {
+        let mut app = test_app();
+        app.view = View::MergeRequests;
+        app.agents = vec![mock_agent("agent-a"), mock_agent("agent-b")];
+        app.selected = 1;
+        app.merge_requests = vec![
+            mock_merge_request("myapp", "feature/a", 1),
+            mock_merge_request("myapp", "feature/b", 2),
+        ];
+
+        app.update(Action::MoveDown);
+
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.selected_mr, 1);
+    }
+
+    #[test]
+    fn r_key_refreshes_merge_requests_only_in_mr_view() {
+        let mut app = test_app();
+        assert!(app.handle_key(make_key(KeyCode::Char('r'))).is_none());
+        app.view = View::MergeRequests;
+        let action = app.handle_key(make_key(KeyCode::Char('r'))).unwrap();
+        assert!(matches!(action, Action::RefreshMergeRequests));
     }
 
     #[test]

@@ -436,6 +436,9 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
             });
         }
         Command::Attach(_) => unreachable!("Attach handled by dispatch"),
+        Command::RefreshMergeRequests(repos) => {
+            let _ = repos.len();
+        }
     }
 }
 
