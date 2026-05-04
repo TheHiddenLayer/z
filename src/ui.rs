@@ -272,21 +272,14 @@ fn draw_merge_request_table(frame: &mut Frame, app: &App, area: Rect) {
         .map(|mr| mr.source_branch.len() + 4 + mr.target_branch.len())
         .max()
         .unwrap_or(0)
-        .max(14) as u16;
-    let title_w = app
-        .merge_requests
-        .iter()
-        .map(|mr| mr.title.len())
-        .max()
-        .unwrap_or(0)
-        .max(5) as u16;
+        .clamp(14, 40) as u16;
     let repo_w = app
         .merge_requests
         .iter()
         .map(|mr| mr.repo_name.len())
         .max()
         .unwrap_or(0)
-        .max(4) as u16;
+        .clamp(4, 24) as u16;
 
     let mut rows = Vec::new();
     for (i, mr) in app
@@ -345,7 +338,7 @@ fn draw_merge_request_table(frame: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(10),
             Constraint::Length(8),
             Constraint::Length(branch_w + 2),
-            Constraint::Min(title_w),
+            Constraint::Min(10),
             Constraint::Length(repo_w + 2),
         ],
     )
