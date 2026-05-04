@@ -46,11 +46,16 @@ pub struct Notifications {
 
 impl Default for Notifications {
     fn default() -> Self {
-        Self { enabled: false, only_when_unfocused: true }
+        Self {
+            enabled: false,
+            only_when_unfocused: true,
+        }
     }
 }
 
-fn default_only_when_unfocused() -> bool { true }
+fn default_only_when_unfocused() -> bool {
+    true
+}
 
 impl Config {
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
@@ -111,7 +116,9 @@ impl Config {
     }
 
     pub fn get_agent(&self, name: &str) -> Option<&AgentDef> {
-        self.agents.iter().find_map(|(n, def)| (n == name).then_some(def))
+        self.agents
+            .iter()
+            .find_map(|(n, def)| (n == name).then_some(def))
     }
 
     pub fn default_agent_name(&self) -> &str {
@@ -164,7 +171,13 @@ fn parse_user_agents(table: toml::Table) -> Result<Vec<(String, AgentDef)>, Stri
         if raw.cmd.trim().is_empty() {
             return Err(format!("agent '{name}': cmd is empty"));
         }
-        out.push((name, AgentDef { cmd: raw.cmd, resume: raw.resume }));
+        out.push((
+            name,
+            AgentDef {
+                cmd: raw.cmd,
+                resume: raw.resume,
+            },
+        ));
     }
     Ok(out)
 }
@@ -182,9 +195,7 @@ fn resolve_default(
         }
         None => match agents.len() {
             1 => Ok(agents[0].0.clone()),
-            _ => Err(
-                "default_agent must be set when [agents] has more than one entry".to_string(),
-            ),
+            _ => Err("default_agent must be set when [agents] has more than one entry".to_string()),
         },
     }
 }
@@ -310,7 +321,10 @@ default_agent = "ghost"
 cmd = "claude"
 "#;
         let err = Config::from_toml_str(toml_str).unwrap_err();
-        assert!(err.contains("default_agent 'ghost' is not in [agents]"), "got: {err}");
+        assert!(
+            err.contains("default_agent 'ghost' is not in [agents]"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -344,7 +358,11 @@ cmd = "solo --go"
 "#;
         let config = Config::from_toml_str(toml_str).unwrap();
         let names: Vec<&str> = config.agents.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, vec!["solo"], "builtins must not appear when user defines [agents]");
+        assert_eq!(
+            names,
+            vec!["solo"],
+            "builtins must not appear when user defines [agents]"
+        );
     }
 
     #[test]

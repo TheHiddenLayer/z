@@ -1,9 +1,9 @@
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use crate::agent::{self, Agent, AgentStatus};
 use crate::config::Config;
 use crate::notifications;
 use crate::scm::MergeRequest;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn chrono_free_date_str() -> String {
     let now = SystemTime::now()
@@ -17,14 +17,23 @@ fn chrono_free_date_str() -> String {
         match m {
             1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
             4 | 6 | 9 | 11 => 30,
-            2 => if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 29 } else { 28 },
+            2 => {
+                if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+                    29
+                } else {
+                    28
+                }
+            }
             _ => 30,
         }
     }
     while remaining >= days_in_month(y, m) as i64 {
         remaining -= days_in_month(y, m) as i64;
         m += 1;
-        if m > 12 { m = 1; y += 1; }
+        if m > 12 {
+            m = 1;
+            y += 1;
+        }
     }
     d += remaining as u32;
     format!("{:02}{:02}", m, d)
@@ -56,7 +65,9 @@ pub enum Action {
 
     // Agent lifecycle (trigger async side effects)
     KillSession(String),
-    DeleteAll { preserve_tmux: bool },
+    DeleteAll {
+        preserve_tmux: bool,
+    },
     Attach,
     AttachReady(Agent),
     RefreshAgents,
@@ -133,7 +144,9 @@ fn generate_branch_name(branches: &[String], date_str: &str) -> String {
 pub enum Command {
     Discover(Vec<PathBuf>),
     LoadBranches(PathBuf),
-    CaptureActivity { session_name: String },
+    CaptureActivity {
+        session_name: String,
+    },
     CreateAgent {
         repo: PathBuf,
         branch: String,
@@ -152,7 +165,10 @@ pub enum Command {
         branch: String,
     },
     Attach(Agent),
-    PrepareAttach { agent: Agent, resume_cmd: String },
+    PrepareAttach {
+        agent: Agent,
+        resume_cmd: String,
+    },
     RefreshMergeRequests(Vec<PathBuf>),
 }
 
@@ -236,8 +252,12 @@ impl App {
     }
 
     fn should_notify(&self) -> bool {
-        if !self.config.notifications.enabled { return false; }
-        if self.config.notifications.only_when_unfocused && self.focused { return false; }
+        if !self.config.notifications.enabled {
+            return false;
+        }
+        if self.config.notifications.only_when_unfocused && self.focused {
+            return false;
+        }
         true
     }
 
@@ -316,7 +336,9 @@ impl App {
     fn reload_branches_command(&self) -> Option<Command> {
         if let Mode::NewAgent { repo_index, .. } = &self.mode {
             let repos = self.config.resolved_repos();
-            repos.get(*repo_index).map(|repo| Command::LoadBranches(repo.clone()))
+            repos
+                .get(*repo_index)
+                .map(|repo| Command::LoadBranches(repo.clone()))
         } else {
             None
         }
@@ -329,10 +351,10 @@ impl App {
         // actually changed. All other non-Tick actions change visible state
         // and need a redraw.
         match &action {
-            Action::Tick
-            | Action::ActivityCaptured { .. }
-            | Action::TerminalFocus(_) => {}
-            _ => { self.dirty = true; }
+            Action::Tick | Action::ActivityCaptured { .. } | Action::TerminalFocus(_) => {}
+            _ => {
+                self.dirty = true;
+            }
         }
         match action {
             // --- Navigation ---
@@ -418,45 +440,56 @@ impl App {
             Action::PickerNext => {
                 let mut reload_branches = false;
                 let repo_count = self.config.resolved_repos().len();
-                let next_agent_name: Option<String> =
-                    if let Mode::NewAgent { focus: NewAgentFocus::Agent, agent_name, .. } = &self.mode {
-                        Some(self.config.cycle_next(agent_name).to_string())
-                    } else {
-                        None
-                    };
+                let next_agent_name: Option<String> = if let Mode::NewAgent {
+                    focus: NewAgentFocus::Agent,
+                    agent_name,
+                    ..
+                } = &self.mode
+                {
+                    Some(self.config.cycle_next(agent_name).to_string())
+                } else {
+                    None
+                };
                 match &mut self.mode {
-                    Mode::NewAgent { focus, repo_index, base_index, branches, branch_mode, existing_branches, agent_name, .. } => {
-                        match focus {
-                            NewAgentFocus::Agent => {
-                                if let Some(n) = next_agent_name {
-                                    *agent_name = n;
-                                }
+                    Mode::NewAgent {
+                        focus,
+                        repo_index,
+                        base_index,
+                        branches,
+                        branch_mode,
+                        existing_branches,
+                        agent_name,
+                        ..
+                    } => match focus {
+                        NewAgentFocus::Agent => {
+                            if let Some(n) = next_agent_name {
+                                *agent_name = n;
                             }
-                            NewAgentFocus::Repo => {
-                                if repo_count > 1 {
-                                    *repo_index = (*repo_index + 1) % repo_count;
-                                    reload_branches = true;
-                                }
-                            }
-                            NewAgentFocus::BranchToggle => {
-                                *branch_mode = match branch_mode {
-                                    BranchMode::New => BranchMode::Existing,
-                                    BranchMode::Existing => BranchMode::New,
-                                };
-                                *base_index = 0;
-                            }
-                            NewAgentFocus::BranchList => {
-                                let count = match branch_mode {
-                                    BranchMode::New => branches.len(),
-                                    BranchMode::Existing => existing_branches.len(),
-                                };
-                                if count > 0 {
-                                    *base_index = (*base_index + 1) % count;
-                                }
-                            }
-                            _ => {}
                         }
-                    }
+                        NewAgentFocus::Repo => {
+                            if repo_count > 1 {
+                                *repo_index = (*repo_index + 1) % repo_count;
+                                reload_branches = true;
+                            }
+                        }
+                        NewAgentFocus::BranchToggle => {
+                            *branch_mode = match branch_mode {
+                                BranchMode::New => BranchMode::Existing,
+                                BranchMode::Existing => BranchMode::New,
+                            };
+                            *base_index = 0;
+                        }
+                        NewAgentFocus::BranchList => {
+                            let count = match branch_mode {
+                                BranchMode::New => branches.len(),
+                                BranchMode::Existing => existing_branches.len(),
+                            };
+                            if count > 0 {
+                                *base_index = (*base_index + 1) % count;
+                            }
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
                 if reload_branches {
@@ -468,45 +501,56 @@ impl App {
             Action::PickerPrev => {
                 let mut reload_branches = false;
                 let repo_count = self.config.resolved_repos().len();
-                let prev_agent_name: Option<String> =
-                    if let Mode::NewAgent { focus: NewAgentFocus::Agent, agent_name, .. } = &self.mode {
-                        Some(self.config.cycle_prev(agent_name).to_string())
-                    } else {
-                        None
-                    };
+                let prev_agent_name: Option<String> = if let Mode::NewAgent {
+                    focus: NewAgentFocus::Agent,
+                    agent_name,
+                    ..
+                } = &self.mode
+                {
+                    Some(self.config.cycle_prev(agent_name).to_string())
+                } else {
+                    None
+                };
                 match &mut self.mode {
-                    Mode::NewAgent { focus, repo_index, base_index, branches, branch_mode, existing_branches, agent_name, .. } => {
-                        match focus {
-                            NewAgentFocus::Agent => {
-                                if let Some(n) = prev_agent_name {
-                                    *agent_name = n;
-                                }
+                    Mode::NewAgent {
+                        focus,
+                        repo_index,
+                        base_index,
+                        branches,
+                        branch_mode,
+                        existing_branches,
+                        agent_name,
+                        ..
+                    } => match focus {
+                        NewAgentFocus::Agent => {
+                            if let Some(n) = prev_agent_name {
+                                *agent_name = n;
                             }
-                            NewAgentFocus::Repo => {
-                                if repo_count > 1 {
-                                    *repo_index = repo_index.checked_sub(1).unwrap_or(repo_count - 1);
-                                    reload_branches = true;
-                                }
-                            }
-                            NewAgentFocus::BranchToggle => {
-                                *branch_mode = match branch_mode {
-                                    BranchMode::New => BranchMode::Existing,
-                                    BranchMode::Existing => BranchMode::New,
-                                };
-                                *base_index = 0;
-                            }
-                            NewAgentFocus::BranchList => {
-                                let count = match branch_mode {
-                                    BranchMode::New => branches.len(),
-                                    BranchMode::Existing => existing_branches.len(),
-                                };
-                                if count > 0 {
-                                    *base_index = base_index.checked_sub(1).unwrap_or(count - 1);
-                                }
-                            }
-                            _ => {}
                         }
-                    }
+                        NewAgentFocus::Repo => {
+                            if repo_count > 1 {
+                                *repo_index = repo_index.checked_sub(1).unwrap_or(repo_count - 1);
+                                reload_branches = true;
+                            }
+                        }
+                        NewAgentFocus::BranchToggle => {
+                            *branch_mode = match branch_mode {
+                                BranchMode::New => BranchMode::Existing,
+                                BranchMode::Existing => BranchMode::New,
+                            };
+                            *base_index = 0;
+                        }
+                        NewAgentFocus::BranchList => {
+                            let count = match branch_mode {
+                                BranchMode::New => branches.len(),
+                                BranchMode::Existing => existing_branches.len(),
+                            };
+                            if count > 0 {
+                                *base_index = base_index.checked_sub(1).unwrap_or(count - 1);
+                            }
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
                 if reload_branches {
@@ -518,17 +562,30 @@ impl App {
             Action::PickerConfirm => {
                 let result = match &self.mode {
                     Mode::NewAgent {
-                        repo_index, branch_mode, prompt, base_index,
-                        branches, existing_branches, branch_name, agent_name, ..
+                        repo_index,
+                        branch_mode,
+                        prompt,
+                        base_index,
+                        branches,
+                        existing_branches,
+                        branch_name,
+                        agent_name,
+                        ..
                     } => {
                         let repos = self.config.resolved_repos();
                         let repo = repos[*repo_index % repos.len()].clone();
-                        let prompt_opt = if prompt.is_empty() { None } else { Some(prompt.clone()) };
+                        let prompt_opt = if prompt.is_empty() {
+                            None
+                        } else {
+                            Some(prompt.clone())
+                        };
                         let name = agent_name.clone();
 
                         match branch_mode {
                             BranchMode::New => {
-                                let base = branches.get(*base_index).cloned()
+                                let base = branches
+                                    .get(*base_index)
+                                    .cloned()
                                     .unwrap_or_else(|| "main".to_string());
                                 let branch_label = if branch_name.is_empty() {
                                     let today = chrono_free_date_str();
@@ -548,8 +605,11 @@ impl App {
                     _ => None,
                 };
 
-                if let Some((repo, branch, new_branch, base_branch, prompt_opt, agent_name)) = result {
-                    let repo_name = repo.file_name()
+                if let Some((repo, branch, new_branch, base_branch, prompt_opt, agent_name)) =
+                    result
+                {
+                    let repo_name = repo
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown")
                         .to_string();
@@ -575,53 +635,72 @@ impl App {
                         quiet_captures: 0,
                         seen_activity_since_seed: false,
                         was_spinner_visible: false,
-                consecutive_emits: 0,
+                        consecutive_emits: 0,
                     });
 
                     cmds.push(Command::CreateAgent {
-                        repo, branch, new_branch, base_branch,
+                        repo,
+                        branch,
+                        new_branch,
+                        base_branch,
                         session_name: sess_name,
                         agent_name,
                         fresh_cmd,
                     });
                     self.mode = Mode::Normal;
-                } else if matches!(self.mode, Mode::NewAgent { branch_mode: BranchMode::Existing, .. }) {
+                } else if matches!(
+                    self.mode,
+                    Mode::NewAgent {
+                        branch_mode: BranchMode::Existing,
+                        ..
+                    }
+                ) {
                     self.status_message = Some("No existing branches available".into());
                 }
             }
 
             // --- Text input ---
             Action::TypeChar(c) => match &mut self.mode {
-                Mode::NewAgent { focus, prompt, branch_name, name_pristine, .. } => {
-                    match focus {
-                        NewAgentFocus::Prompt => prompt.push(c),
-                        NewAgentFocus::Name => {
-                            if *name_pristine {
-                                branch_name.clear();
-                                *name_pristine = false;
-                            }
-                            branch_name.push(c);
+                Mode::NewAgent {
+                    focus,
+                    prompt,
+                    branch_name,
+                    name_pristine,
+                    ..
+                } => match focus {
+                    NewAgentFocus::Prompt => prompt.push(c),
+                    NewAgentFocus::Name => {
+                        if *name_pristine {
+                            branch_name.clear();
+                            *name_pristine = false;
                         }
-                        _ => {}
+                        branch_name.push(c);
                     }
-                }
+                    _ => {}
+                },
                 _ => {}
             },
             Action::TypeBackspace => match &mut self.mode {
-                Mode::NewAgent { focus, prompt, branch_name, name_pristine, .. } => {
-                    match focus {
-                        NewAgentFocus::Prompt => { prompt.pop(); }
-                        NewAgentFocus::Name => {
-                            if *name_pristine {
-                                branch_name.clear();
-                                *name_pristine = false;
-                            } else {
-                                branch_name.pop();
-                            }
-                        }
-                        _ => {}
+                Mode::NewAgent {
+                    focus,
+                    prompt,
+                    branch_name,
+                    name_pristine,
+                    ..
+                } => match focus {
+                    NewAgentFocus::Prompt => {
+                        prompt.pop();
                     }
-                }
+                    NewAgentFocus::Name => {
+                        if *name_pristine {
+                            branch_name.clear();
+                            *name_pristine = false;
+                        } else {
+                            branch_name.pop();
+                        }
+                    }
+                    _ => {}
+                },
                 _ => {}
             },
 
@@ -737,7 +816,11 @@ impl App {
             }
 
             // --- Background results ---
-            Action::AgentReady { branch, session, worktree_path } => {
+            Action::AgentReady {
+                branch,
+                session,
+                worktree_path,
+            } => {
                 if let Some(agent) = self.agents.iter_mut().find(|a| a.session_name == session) {
                     agent.status = AgentStatus::Running;
                     // Populate the path now so an immediate delete works
@@ -747,7 +830,9 @@ impl App {
                 self.status_message = Some(format!("Ready: {}", branch));
             }
             Action::AgentFailed { session, error } => {
-                let label = self.agents.iter()
+                let label = self
+                    .agents
+                    .iter()
                     .find(|a| a.session_name == session)
                     .map(|a| format!("{}/{}", a.repo_name, a.slug))
                     .unwrap_or_else(|| session.clone());
@@ -769,7 +854,11 @@ impl App {
                 // continuous across the 3s refresh — discover re-seeds these to
                 // defaults on every cycle.
                 for new_agent in &mut new_agents {
-                    if let Some(old) = self.agents.iter().find(|a| a.session_name == new_agent.session_name) {
+                    if let Some(old) = self
+                        .agents
+                        .iter()
+                        .find(|a| a.session_name == new_agent.session_name)
+                    {
                         if new_agent.base_branch.is_none() {
                             new_agent.base_branch = old.base_branch.clone();
                         }
@@ -797,7 +886,12 @@ impl App {
                     self.selected = self.agents.len() - 1;
                 }
             }
-            Action::ActivityCaptured { session_name, content, content_hash, attached_count } => {
+            Action::ActivityCaptured {
+                session_name,
+                content,
+                content_hash,
+                attached_count,
+            } => {
                 // If this capture is for the currently-selected agent, the
                 // pane content doubles as preview material.
                 let is_selected = self
@@ -866,20 +960,33 @@ impl App {
                     }
                 }
             }
-            Action::BranchesLoaded { branches: new_branches } => {
+            Action::BranchesLoaded {
+                branches: new_branches,
+            } => {
                 let repos = self.config.resolved_repos();
-                let worktree_branches: Vec<(PathBuf, String)> = self.agents.iter()
+                let worktree_branches: Vec<(PathBuf, String)> = self
+                    .agents
+                    .iter()
                     .map(|a| (a.repo_path.clone(), a.branch.clone()))
                     .collect();
                 match &mut self.mode {
-                    Mode::NewAgent { branches, base_index, branch_name, name_pristine, existing_branches, repo_index, .. } => {
+                    Mode::NewAgent {
+                        branches,
+                        base_index,
+                        branch_name,
+                        name_pristine,
+                        existing_branches,
+                        repo_index,
+                        ..
+                    } => {
                         let today = chrono_free_date_str();
                         *branch_name = generate_branch_name(&new_branches, &today);
                         *name_pristine = true;
                         *base_index = find_main_branch(&new_branches);
 
                         let repo_path = repos.get(*repo_index).cloned();
-                        *existing_branches = new_branches.iter()
+                        *existing_branches = new_branches
+                            .iter()
                             .filter(|b| {
                                 !worktree_branches.iter().any(|(rp, ab)| {
                                     repo_path.as_ref().is_some_and(|r| r == rp) && ab == *b
@@ -895,7 +1002,8 @@ impl App {
             }
             Action::MergeRequestsRefreshed(mrs) => {
                 self.merge_requests = mrs;
-                if self.selected_mr >= self.merge_requests.len() && !self.merge_requests.is_empty() {
+                if self.selected_mr >= self.merge_requests.len() && !self.merge_requests.is_empty()
+                {
                     self.selected_mr = self.merge_requests.len() - 1;
                 }
                 if self.merge_requests.is_empty() {
@@ -983,7 +1091,15 @@ impl App {
             }
 
             Action::FocusNext => {
-                if let Mode::NewAgent { focus, branch_mode, branch_name, branches, name_pristine, .. } = &mut self.mode {
+                if let Mode::NewAgent {
+                    focus,
+                    branch_mode,
+                    branch_name,
+                    branches,
+                    name_pristine,
+                    ..
+                } = &mut self.mode
+                {
                     if *focus == NewAgentFocus::Name && branch_name.is_empty() {
                         let today = chrono_free_date_str();
                         *branch_name = generate_branch_name(branches, &today);
@@ -1001,7 +1117,15 @@ impl App {
                 }
             }
             Action::FocusPrev => {
-                if let Mode::NewAgent { focus, branch_mode, branch_name, branches, name_pristine, .. } = &mut self.mode {
+                if let Mode::NewAgent {
+                    focus,
+                    branch_mode,
+                    branch_name,
+                    branches,
+                    name_pristine,
+                    ..
+                } = &mut self.mode
+                {
                     if *focus == NewAgentFocus::Name && branch_name.is_empty() {
                         let today = chrono_free_date_str();
                         *branch_name = generate_branch_name(branches, &today);
@@ -1039,11 +1163,10 @@ impl App {
                     KeyCode::Char('m') => Some(Action::ToggleView),
                     KeyCode::Char('n') => Some(Action::StartNewAgent),
                     KeyCode::Char('a') | KeyCode::Enter => Some(Action::Attach),
-                    KeyCode::Char('x') => {
-                        self.selected_agent()
-                            .filter(|a| a.status.has_session())
-                            .map(|a| Action::KillSession(a.session_name.clone()))
-                    }
+                    KeyCode::Char('x') => self
+                        .selected_agent()
+                        .filter(|a| a.status.has_session())
+                        .map(|a| Action::KillSession(a.session_name.clone())),
                     KeyCode::Char('d') => Some(Action::StartDelete),
                     KeyCode::Char('?') => Some(Action::ToggleHelp),
                     _ => None,
@@ -1062,8 +1185,12 @@ impl App {
             Mode::ConfirmDelete => match key.code {
                 KeyCode::Esc => Some(Action::CancelMode),
                 KeyCode::Char('q') => Some(Action::CancelMode),
-                KeyCode::Char('y') => Some(Action::DeleteAll { preserve_tmux: false }),
-                KeyCode::Char('p') => Some(Action::DeleteAll { preserve_tmux: true }),
+                KeyCode::Char('y') => Some(Action::DeleteAll {
+                    preserve_tmux: false,
+                }),
+                KeyCode::Char('p') => Some(Action::DeleteAll {
+                    preserve_tmux: true,
+                }),
                 _ => None,
             },
             Mode::NewAgent { focus, .. } => match key.code {
@@ -1078,10 +1205,20 @@ impl App {
                 KeyCode::Tab => Some(Action::FocusNext),
                 KeyCode::BackTab => Some(Action::FocusPrev),
                 // Horizontal fields: Repo, BranchToggle
-                KeyCode::Left if matches!(focus, NewAgentFocus::Agent | NewAgentFocus::Repo | NewAgentFocus::BranchToggle) => {
+                KeyCode::Left
+                    if matches!(
+                        focus,
+                        NewAgentFocus::Agent | NewAgentFocus::Repo | NewAgentFocus::BranchToggle
+                    ) =>
+                {
                     Some(Action::PickerPrev)
                 }
-                KeyCode::Right if matches!(focus, NewAgentFocus::Agent | NewAgentFocus::Repo | NewAgentFocus::BranchToggle) => {
+                KeyCode::Right
+                    if matches!(
+                        focus,
+                        NewAgentFocus::Agent | NewAgentFocus::Repo | NewAgentFocus::BranchToggle
+                    ) =>
+                {
                     Some(Action::PickerNext)
                 }
                 // Vertical field: BranchList
@@ -1098,13 +1235,19 @@ impl App {
                     Some(Action::PickerNext)
                 }
                 // Text fields: Name, Prompt
-                KeyCode::Backspace if matches!(focus, NewAgentFocus::Prompt | NewAgentFocus::Name) => {
+                KeyCode::Backspace
+                    if matches!(focus, NewAgentFocus::Prompt | NewAgentFocus::Name) =>
+                {
                     Some(Action::TypeBackspace)
                 }
-                KeyCode::Char('q') if !matches!(focus, NewAgentFocus::Prompt | NewAgentFocus::Name) => {
+                KeyCode::Char('q')
+                    if !matches!(focus, NewAgentFocus::Prompt | NewAgentFocus::Name) =>
+                {
                     Some(Action::CancelMode)
                 }
-                KeyCode::Char(c) if matches!(focus, NewAgentFocus::Prompt | NewAgentFocus::Name) => {
+                KeyCode::Char(c)
+                    if matches!(focus, NewAgentFocus::Prompt | NewAgentFocus::Name) =>
+                {
                     Some(Action::TypeChar(c))
                 }
                 _ => None,
@@ -1177,7 +1320,10 @@ mod tests {
             session: "z-myapp-fix-auth".into(),
             worktree_path: path.clone(),
         });
-        assert!(matches!(app.agents[0].status, crate::agent::AgentStatus::Running));
+        assert!(matches!(
+            app.agents[0].status,
+            crate::agent::AgentStatus::Running
+        ));
         assert_eq!(app.agents[0].worktree_path, path);
     }
 
@@ -1224,8 +1370,10 @@ mod tests {
         agent.was_spinner_visible = false;
         app.agents = vec![agent];
         app.update(Action::Tick);
-        assert!(!app.agents[0].was_spinner_visible,
-            "freshly-discovered agent must not flash a spinner");
+        assert!(
+            !app.agents[0].was_spinner_visible,
+            "freshly-discovered agent must not flash a spinner"
+        );
     }
 
     #[test]
@@ -1245,8 +1393,10 @@ mod tests {
         agent.was_spinner_visible = false; // we were already idle pre-detach
         app.agents = vec![agent];
         app.update(Action::Tick);
-        assert!(!app.agents[0].was_spinner_visible,
-            "post-detach idle agent must stay idle through the unobserved window");
+        assert!(
+            !app.agents[0].was_spinner_visible,
+            "post-detach idle agent must stay idle through the unobserved window"
+        );
 
         // Simulate the next capture seeding the hash. seen_activity must
         // reset so the new seed doesn't pretend prior activity continues.
@@ -1257,8 +1407,10 @@ mod tests {
             attached_count: 0,
         });
         app.update(Action::Tick);
-        assert!(!app.agents[0].was_spinner_visible,
-            "first post-detach capture must not resurrect the spinner");
+        assert!(
+            !app.agents[0].was_spinner_visible,
+            "first post-detach capture must not resurrect the spinner"
+        );
     }
 
     #[test]
@@ -1277,9 +1429,11 @@ mod tests {
         app.update(Action::Tick);
         // Edge detected → flag flipped off, latch reset.
         assert!(!app.agents[0].was_spinner_visible);
-        assert!(!app.agents[0].seen_activity_since_seed,
+        assert!(
+            !app.agents[0].seen_activity_since_seed,
             "spinner→done edge resets the activity latch so post-edge \
-             blips can't re-fire the notification");
+             blips can't re-fire the notification"
+        );
     }
 
     #[test]
@@ -1319,8 +1473,10 @@ mod tests {
             attached_count: 0,
         });
         assert_eq!(app.agents[0].consecutive_emits, 1);
-        assert!(!app.agents[0].seen_activity_since_seed,
-            "single-capture blip must not re-claim activity");
+        assert!(
+            !app.agents[0].seen_activity_since_seed,
+            "single-capture blip must not re-claim activity"
+        );
 
         // Subsequent quiet captures: the blip's new hash stays put.
         // shows_spinner stays false; no second edge to fire.
@@ -1332,8 +1488,10 @@ mod tests {
                 attached_count: 0,
             });
             app.update(Action::Tick);
-            assert!(!app.agents[0].was_spinner_visible,
-                "post-done single-blip must never resurrect the spinner");
+            assert!(
+                !app.agents[0].was_spinner_visible,
+                "post-done single-blip must never resurrect the spinner"
+            );
         }
     }
 
@@ -1367,8 +1525,10 @@ mod tests {
             content_hash: 0xa2_u64,
             attached_count: 0,
         });
-        assert!(app.agents[0].seen_activity_since_seed,
-            "EMIT_THRESHOLD consecutive emits re-arm the activity latch");
+        assert!(
+            app.agents[0].seen_activity_since_seed,
+            "EMIT_THRESHOLD consecutive emits re-arm the activity latch"
+        );
 
         // Tick: spinner is back on.
         app.update(Action::Tick);
@@ -1413,8 +1573,10 @@ mod tests {
         app.update(Action::Tick);
 
         // Agent must still be considered working (counter unchanged at 2).
-        assert!(app.agents[0].was_spinner_visible,
-            "no captures during gap → no false 'done' edge");
+        assert!(
+            app.agents[0].was_spinner_visible,
+            "no captures during gap → no false 'done' edge"
+        );
     }
 
     #[test]
@@ -1438,8 +1600,10 @@ mod tests {
 
         app.update(Action::Tick);
 
-        assert!(app.agents[0].was_spinner_visible,
-            "post-detach Tick must keep agent in working state");
+        assert!(
+            app.agents[0].was_spinner_visible,
+            "post-detach Tick must keep agent in working state"
+        );
     }
 
     #[test]
@@ -1477,7 +1641,7 @@ mod tests {
         a.last_pane_hash = Some(0x1);
         a.quiet_captures = crate::agent::QUIET_THRESHOLD;
         a.seen_activity_since_seed = false; // never observed real activity
-        a.was_spinner_visible = true;       // was showing spinner last tick
+        a.was_spinner_visible = true; // was showing spinner last tick
         app.agents = vec![a];
 
         // (Can't easily assert "no notification fired" without mocking
@@ -1518,8 +1682,10 @@ mod tests {
 
         app.update(Action::Tick);
 
-        assert!(!app.agents[0].was_spinner_visible,
-            "quiet_captures at threshold drops the agent from the working set");
+        assert!(
+            !app.agents[0].was_spinner_visible,
+            "quiet_captures at threshold drops the agent from the working set"
+        );
     }
 
     #[test]
@@ -1560,8 +1726,14 @@ mod tests {
             error: "worktree: not a working tree".into(),
         });
         let msg = app.status_message.as_deref().unwrap_or("");
-        assert!(msg.contains("fix-auth"), "expected branch in status: {msg:?}");
-        assert!(msg.contains("not a working tree"), "expected error in status: {msg:?}");
+        assert!(
+            msg.contains("fix-auth"),
+            "expected branch in status: {msg:?}"
+        );
+        assert!(
+            msg.contains("not a working tree"),
+            "expected error in status: {msg:?}"
+        );
     }
 
     #[test]
@@ -1606,11 +1778,15 @@ mod tests {
             quiet_captures: 0,
             seen_activity_since_seed: false,
             was_spinner_visible: false,
-                consecutive_emits: 0,
+            consecutive_emits: 0,
         }
     }
 
-    fn mock_merge_request(repo_name: &str, source_branch: &str, iid: u64) -> crate::scm::MergeRequest {
+    fn mock_merge_request(
+        repo_name: &str,
+        source_branch: &str,
+        iid: u64,
+    ) -> crate::scm::MergeRequest {
         crate::scm::MergeRequest {
             repo_name: repo_name.into(),
             iid,
@@ -1657,7 +1833,10 @@ mod tests {
     fn mr_refresh_failure_sets_status_message() {
         let mut app = test_app();
         app.update(Action::MergeRequestsFailed("gitlab unavailable".into()));
-        assert_eq!(app.status_message.as_deref(), Some("MR refresh: gitlab unavailable"));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("MR refresh: gitlab unavailable")
+        );
     }
 
     #[test]
@@ -1751,7 +1930,10 @@ mod tests {
 
         assert_eq!(app.agents.len(), 1);
         assert_eq!(app.agents[0].branch, "feature/a");
-        assert!(matches!(app.agents[0].status, crate::agent::AgentStatus::Creating));
+        assert!(matches!(
+            app.agents[0].status,
+            crate::agent::AgentStatus::Creating
+        ));
         assert!(matches!(
             &cmds[0],
             Command::CreateAgent {
@@ -1771,7 +1953,10 @@ mod tests {
         let cmds = app.update(Action::LaunchSelectedMergeRequest);
 
         assert!(cmds.is_empty());
-        assert_eq!(app.status_message.as_deref(), Some("No merge request selected"));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("No merge request selected")
+        );
     }
 
     #[test]
@@ -1807,21 +1992,14 @@ mod tests {
 
     #[test]
     fn generate_branch_name_increments() {
-        let branches: Vec<String> = vec![
-            "main".into(),
-            "z-0409-1".into(),
-            "z-0409-2".into(),
-        ];
+        let branches: Vec<String> = vec!["main".into(), "z-0409-1".into(), "z-0409-2".into()];
         let name = generate_branch_name(&branches, "0409");
         assert_eq!(name, "z-0409-3");
     }
 
     #[test]
     fn generate_branch_name_ignores_other_dates() {
-        let branches: Vec<String> = vec![
-            "z-0408-5".into(),
-            "z-0409-1".into(),
-        ];
+        let branches: Vec<String> = vec!["z-0408-5".into(), "z-0409-1".into()];
         let name = generate_branch_name(&branches, "0409");
         assert_eq!(name, "z-0409-2");
     }
@@ -1919,7 +2097,14 @@ mod tests {
         assert!(matches!(app.mode, Mode::Normal));
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            Command::CreateAgent { branch, new_branch, base_branch, agent_name, fresh_cmd, .. } => {
+            Command::CreateAgent {
+                branch,
+                new_branch,
+                base_branch,
+                agent_name,
+                fresh_cmd,
+                ..
+            } => {
                 assert_eq!(branch, "z-0409-1");
                 assert!(*new_branch);
                 assert_eq!(*base_branch, Some("main".into()));
@@ -1987,7 +2172,10 @@ mod tests {
         match &cmds[0] {
             Command::CreateAgent { fresh_cmd, .. } => {
                 // Empty prompt: fresh_cmd is the agent's bare cmd, no quoted prompt.
-                assert_eq!(*fresh_cmd, "codex --dangerously-bypass-approvals-and-sandbox");
+                assert_eq!(
+                    *fresh_cmd,
+                    "codex --dangerously-bypass-approvals-and-sandbox"
+                );
             }
             other => panic!("expected CreateAgent, got {:?}", other),
         }
@@ -2014,8 +2202,17 @@ mod tests {
         app.update(Action::BranchesLoaded {
             branches: vec!["develop".into(), "main".into(), existing_branch.clone()],
         });
-        if let Mode::NewAgent { branches, base_index, branch_name, .. } = &app.mode {
-            assert_eq!(branches, &vec!["develop".to_string(), "main".to_string(), existing_branch]);
+        if let Mode::NewAgent {
+            branches,
+            base_index,
+            branch_name,
+            ..
+        } = &app.mode
+        {
+            assert_eq!(
+                branches,
+                &vec!["develop".to_string(), "main".to_string(), existing_branch]
+            );
             assert_eq!(*base_index, 1); // "main" is at index 1
             assert_eq!(*branch_name, expected_branch); // existing branch exists, so next is 2
         } else {
@@ -2124,7 +2321,12 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::TypeChar('f'));
-        if let Mode::NewAgent { branch_name, name_pristine, .. } = &app.mode {
+        if let Mode::NewAgent {
+            branch_name,
+            name_pristine,
+            ..
+        } = &app.mode
+        {
             assert_eq!(branch_name, "f");
             assert!(!name_pristine);
         } else {
@@ -2148,7 +2350,12 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::TypeBackspace);
-        if let Mode::NewAgent { branch_name, name_pristine, .. } = &app.mode {
+        if let Mode::NewAgent {
+            branch_name,
+            name_pristine,
+            ..
+        } = &app.mode
+        {
             assert_eq!(branch_name, "");
             assert!(!name_pristine);
         } else {
@@ -2173,8 +2380,17 @@ mod tests {
         };
         // Tab away from empty Name field
         app.update(Action::FocusNext);
-        if let Mode::NewAgent { branch_name, name_pristine, focus, .. } = &app.mode {
-            assert!(!branch_name.is_empty(), "should have snapped back to generated name");
+        if let Mode::NewAgent {
+            branch_name,
+            name_pristine,
+            focus,
+            ..
+        } = &app.mode
+        {
+            assert!(
+                !branch_name.is_empty(),
+                "should have snapped back to generated name"
+            );
             assert!(branch_name.starts_with("z-"));
             assert!(*name_pristine);
             assert_eq!(*focus, NewAgentFocus::Prompt);
@@ -2333,7 +2549,7 @@ mod tests {
         let expected = vec![
             NewAgentFocus::BranchToggle,
             NewAgentFocus::BranchList,
-            NewAgentFocus::Prompt,  // skips Name
+            NewAgentFocus::Prompt, // skips Name
             NewAgentFocus::Agent,
             NewAgentFocus::Repo,
         ];
@@ -2386,7 +2602,12 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { branch_mode, base_index, .. } = &app.mode {
+        if let Mode::NewAgent {
+            branch_mode,
+            base_index,
+            ..
+        } = &app.mode
+        {
             assert_eq!(*branch_mode, BranchMode::Existing);
             assert_eq!(*base_index, 0); // reset on toggle
         } else {
@@ -2533,9 +2754,17 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::BranchesLoaded {
-            branches: vec!["main".into(), "develop".into(), "fix-auth".into(), "feature-new".into()],
+            branches: vec![
+                "main".into(),
+                "develop".into(),
+                "fix-auth".into(),
+                "feature-new".into(),
+            ],
         });
-        if let Mode::NewAgent { existing_branches, .. } = &app.mode {
+        if let Mode::NewAgent {
+            existing_branches, ..
+        } = &app.mode
+        {
             // fix-auth has a worktree (in agents), so excluded
             assert!(existing_branches.contains(&"main".to_string()));
             assert!(existing_branches.contains(&"develop".to_string()));
@@ -2568,7 +2797,10 @@ mod tests {
         app.update(Action::BranchesLoaded {
             branches: vec!["main".into(), "fix-auth".into()],
         });
-        if let Mode::NewAgent { existing_branches, .. } = &app.mode {
+        if let Mode::NewAgent {
+            existing_branches, ..
+        } = &app.mode
+        {
             // fix-auth is on a different repo, so it should NOT be excluded
             assert!(existing_branches.contains(&"fix-auth".to_string()));
             assert_eq!(existing_branches.len(), 2);
@@ -2596,7 +2828,13 @@ mod tests {
         assert!(matches!(app.mode, Mode::Normal));
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            Command::CreateAgent { branch, new_branch, base_branch, fresh_cmd, .. } => {
+            Command::CreateAgent {
+                branch,
+                new_branch,
+                base_branch,
+                fresh_cmd,
+                ..
+            } => {
                 assert_eq!(branch, "feature-auth"); // existing_branches[1]
                 assert!(!new_branch);
                 assert_eq!(*base_branch, None);
@@ -2655,7 +2893,12 @@ mod tests {
         let cmds = app.update(Action::Attach);
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0], Command::PrepareAttach { .. }));
-        assert!(app.status_message.as_deref().unwrap_or("").contains("fix-auth"));
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("fix-auth")
+        );
     }
 
     #[test]
@@ -2672,9 +2915,17 @@ mod tests {
         let mut app = test_app();
         app.agents = vec![mock_agent("fix-auth")];
         app.mode = Mode::ConfirmDelete;
-        let cmds = app.update(Action::DeleteAll { preserve_tmux: false });
+        let cmds = app.update(Action::DeleteAll {
+            preserve_tmux: false,
+        });
         assert_eq!(cmds.len(), 1);
-        assert!(matches!(cmds[0], Command::DeleteAgent { kill_session: true, .. }));
+        assert!(matches!(
+            cmds[0],
+            Command::DeleteAgent {
+                kill_session: true,
+                ..
+            }
+        ));
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -2683,9 +2934,17 @@ mod tests {
         let mut app = test_app();
         app.agents = vec![mock_agent("fix-auth")];
         app.mode = Mode::ConfirmDelete;
-        let cmds = app.update(Action::DeleteAll { preserve_tmux: true });
+        let cmds = app.update(Action::DeleteAll {
+            preserve_tmux: true,
+        });
         assert_eq!(cmds.len(), 1);
-        assert!(matches!(cmds[0], Command::DeleteAgent { kill_session: false, .. }));
+        assert!(matches!(
+            cmds[0],
+            Command::DeleteAgent {
+                kill_session: false,
+                ..
+            }
+        ));
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -2696,7 +2955,9 @@ mod tests {
         let action = app.handle_key(make_key(KeyCode::Char('y')));
         assert!(matches!(
             action,
-            Some(Action::DeleteAll { preserve_tmux: false })
+            Some(Action::DeleteAll {
+                preserve_tmux: false
+            })
         ));
     }
 
@@ -2707,7 +2968,9 @@ mod tests {
         let action = app.handle_key(make_key(KeyCode::Char('p')));
         assert!(matches!(
             action,
-            Some(Action::DeleteAll { preserve_tmux: true })
+            Some(Action::DeleteAll {
+                preserve_tmux: true
+            })
         ));
     }
 
@@ -2715,7 +2978,10 @@ mod tests {
     fn start_new_agent_begins_at_agent_focus() {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
-        if let Mode::NewAgent { focus, branch_mode, .. } = &app.mode {
+        if let Mode::NewAgent {
+            focus, branch_mode, ..
+        } = &app.mode
+        {
             assert_eq!(*focus, NewAgentFocus::Agent);
             assert_eq!(*branch_mode, BranchMode::New);
         } else {
@@ -2796,7 +3062,11 @@ mod tests {
         let cmds = app.update(Action::PickerConfirm);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            Command::CreateAgent { agent_name, fresh_cmd, .. } => {
+            Command::CreateAgent {
+                agent_name,
+                fresh_cmd,
+                ..
+            } => {
                 assert_eq!(agent_name, "claude");
                 assert_eq!(fresh_cmd, "claude --dangerously-skip-permissions");
             }
@@ -2892,8 +3162,10 @@ mod tests {
         assert_eq!(app.agents[0].last_pane_hash, Some(0x5678));
         assert_eq!(app.agents[0].quiet_captures, 0);
         assert_eq!(app.agents[0].consecutive_emits, 1);
-        assert!(!app.agents[0].seen_activity_since_seed,
-            "single hash change must not yet claim activity");
+        assert!(
+            !app.agents[0].seen_activity_since_seed,
+            "single hash change must not yet claim activity"
+        );
         assert!(app.dirty);
     }
 
@@ -2976,8 +3248,10 @@ mod tests {
 
         assert_eq!(app.agents[0].last_pane_hash, Some(0x5678));
         assert_eq!(app.agents[0].last_attached_count, Some(1));
-        assert!(!app.agents[0].seen_activity_since_seed,
-            "attach-induced hash change must not claim activity");
+        assert!(
+            !app.agents[0].seen_activity_since_seed,
+            "attach-induced hash change must not claim activity"
+        );
     }
 
     #[test]
@@ -3010,8 +3284,10 @@ mod tests {
         // First post-detach capture takes the None-hash branch: it reseeds
         // and zeroes the counter without claiming activity.
         assert_eq!(app.agents[0].quiet_captures, 0);
-        assert!(!app.agents[0].seen_activity_since_seed,
-            "post-detach reseed must not mark activity");
+        assert!(
+            !app.agents[0].seen_activity_since_seed,
+            "post-detach reseed must not mark activity"
+        );
     }
 
     #[test]
@@ -3031,8 +3307,10 @@ mod tests {
         });
 
         assert_eq!(app.agents[0].quiet_captures, 0);
-        assert!(!app.agents[0].seen_activity_since_seed,
-            "first seed must not claim activity");
+        assert!(
+            !app.agents[0].seen_activity_since_seed,
+            "first seed must not claim activity"
+        );
     }
 
     #[test]
@@ -3072,10 +3350,14 @@ mod tests {
             attached_count: 1, // user attached — pane reflowed
         });
 
-        assert_eq!(app.agents[0].quiet_captures, 0,
-            "reseed must reset counter so we don't accumulate against a stale hash");
-        assert!(!app.agents[0].seen_activity_since_seed,
-            "reflow on attach is not real activity");
+        assert_eq!(
+            app.agents[0].quiet_captures, 0,
+            "reseed must reset counter so we don't accumulate against a stale hash"
+        );
+        assert!(
+            !app.agents[0].seen_activity_since_seed,
+            "reflow on attach is not real activity"
+        );
     }
 
     #[test]
@@ -3092,10 +3374,14 @@ mod tests {
 
         assert_eq!(app.agents[0].last_pane_hash, None);
         assert_eq!(app.agents[0].quiet_captures, 0);
-        assert!(app.agents[0].seen_activity_since_seed,
-            "lifetime activity history is preserved across detach");
-        assert!(matches!(app.agents[0].status, AgentStatus::Running),
-            "status untouched on detach");
+        assert!(
+            app.agents[0].seen_activity_since_seed,
+            "lifetime activity history is preserved across detach"
+        );
+        assert!(
+            matches!(app.agents[0].status, AgentStatus::Running),
+            "status untouched on detach"
+        );
     }
 
     #[test]
@@ -3124,8 +3410,10 @@ mod tests {
             attached_count: 1,
         });
 
-        assert!(app.agents[0].seen_activity_since_seed,
-            "two consecutive hash deltas with stable attach count is genuine activity");
+        assert!(
+            app.agents[0].seen_activity_since_seed,
+            "two consecutive hash deltas with stable attach count is genuine activity"
+        );
         assert_eq!(app.agents[0].quiet_captures, 0);
     }
 
@@ -3152,7 +3440,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(captures.len(), 2, "expected 2 capture cmds, got {captures:?}");
+        assert_eq!(
+            captures.len(),
+            2,
+            "expected 2 capture cmds, got {captures:?}"
+        );
         assert!(captures.contains(&"z-myapp-a"));
         assert!(captures.contains(&"z-myapp-b"));
         assert!(!captures.iter().any(|s| *s == "z-myapp-c"));
