@@ -1,7 +1,9 @@
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use tokio::process::Command;
 
 pub type ScmResult<T> = Result<T, ScmError>;
 
@@ -145,6 +147,82 @@ fn infer_gitlab_state(mr: &GitLabMergeRequest) -> MergeRequestState {
     MergeRequestState::Unknown
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GitLabScm;
+
+impl GitLabScm {
+    pub fn mr_list_args() -> [&'static str; 6] {
+        ["mr", "list", "--state", "opened", "--output", "json"]
+    }
+}
+
+impl ScmProvider for GitLabScm {
+    fn list_open_merge_requests<'a>(
+        &'a self,
+        repo: &'a ScmRepo,
+    ) -> BoxFuture<'a, ScmResult<Vec<MergeRequest>>> {
+        async move {
+            let output = Command::new("glab")
+                .args(Self::mr_list_args())
+                .current_dir(&repo.local_path)
+                .output()
+                .await
+                .map_err(|e| ScmError::CommandFailed {
+                    command: "glab mr list".to_string(),
+                    stderr: e.to_string(),
+                })?;
+
+            if !output.status.success() {
+                return Err(ScmError::CommandFailed {
+                    command: "glab mr list".to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                });
+            }
+
+            parse_gitlab_merge_requests(&repo.name, &String::from_utf8_lossy(&output.stdout))
+        }
+        .boxed()
+    }
+}
+
+pub fn repo_name_from_path(path: &Path) -> ScmResult<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(ToString::to_string)
+        .ok_or_else(|| ScmError::RemoteUrlMissing {
+            repo_name: path.display().to_string(),
+        })
+}
+
+pub async fn scm_repo_from_path(path: &Path) -> ScmResult<ScmRepo> {
+    let name = repo_name_from_path(path)?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .await
+        .map_err(|e| ScmError::CommandFailed {
+            command: "git remote get-url origin".to_string(),
+            stderr: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        return Err(ScmError::RemoteUrlMissing { repo_name: name });
+    }
+
+    let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if remote_url.is_empty() {
+        return Err(ScmError::RemoteUrlMissing { repo_name: name });
+    }
+
+    Ok(ScmRepo {
+        local_path: path.to_path_buf(),
+        name,
+        remote_url,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +359,19 @@ mod tests {
     fn malformed_json_returns_parse_failed() {
         let err = parse_gitlab_merge_requests("app", "not-json").unwrap_err();
         assert!(matches!(err, ScmError::ParseFailed(_)));
+    }
+
+    #[test]
+    fn repo_name_from_path_uses_directory_name() {
+        let path = std::path::Path::new("/tmp/work/myapp");
+        assert_eq!(repo_name_from_path(path).unwrap(), "myapp");
+    }
+
+    #[test]
+    fn gitlab_mr_list_args_are_stable() {
+        assert_eq!(
+            GitLabScm::mr_list_args(),
+            ["mr", "list", "--state", "opened", "--output", "json"]
+        );
     }
 }
