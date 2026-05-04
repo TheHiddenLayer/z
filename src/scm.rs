@@ -24,6 +24,7 @@ pub struct ScmRepo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeRequest {
     pub repo_name: String,
+    pub repo_path: PathBuf,
     pub iid: u64,
     pub title: String,
     pub source_branch: String,
@@ -93,6 +94,21 @@ struct GitLabPipeline {
 }
 
 pub fn parse_gitlab_merge_requests(repo_name: &str, json: &str) -> ScmResult<Vec<MergeRequest>> {
+    parse_gitlab_merge_requests_with_repo(repo_name, PathBuf::new(), json)
+}
+
+pub fn parse_gitlab_merge_requests_for_repo(
+    repo: &ScmRepo,
+    json: &str,
+) -> ScmResult<Vec<MergeRequest>> {
+    parse_gitlab_merge_requests_with_repo(&repo.name, repo.local_path.clone(), json)
+}
+
+fn parse_gitlab_merge_requests_with_repo(
+    repo_name: &str,
+    repo_path: PathBuf,
+    json: &str,
+) -> ScmResult<Vec<MergeRequest>> {
     let raw: Vec<GitLabMergeRequest> =
         serde_json::from_str(json).map_err(|e| ScmError::ParseFailed(e.to_string()))?;
     Ok(raw
@@ -101,6 +117,7 @@ pub fn parse_gitlab_merge_requests(repo_name: &str, json: &str) -> ScmResult<Vec
             let state = infer_gitlab_state(&mr);
             MergeRequest {
                 repo_name: repo_name.to_string(),
+                repo_path: repo_path.clone(),
                 iid: mr.iid,
                 title: mr.title,
                 source_branch: mr.source_branch,
@@ -150,9 +167,20 @@ fn infer_gitlab_state(mr: &GitLabMergeRequest) -> MergeRequestState {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GitLabScm;
 
+const GITLAB_MR_PER_PAGE: usize = 100;
+
 impl GitLabScm {
-    pub fn mr_list_args() -> [&'static str; 6] {
-        ["mr", "list", "--state", "opened", "--output", "json"]
+    pub fn mr_list_args(page: usize) -> Vec<String> {
+        vec![
+            "mr".to_string(),
+            "list".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+            "--per-page".to_string(),
+            GITLAB_MR_PER_PAGE.to_string(),
+            "--page".to_string(),
+            page.to_string(),
+        ]
     }
 }
 
@@ -162,24 +190,41 @@ impl ScmProvider for GitLabScm {
         repo: &'a ScmRepo,
     ) -> BoxFuture<'a, ScmResult<Vec<MergeRequest>>> {
         async move {
-            let output = Command::new("glab")
-                .args(Self::mr_list_args())
-                .current_dir(&repo.local_path)
-                .output()
-                .await
-                .map_err(|e| ScmError::CommandFailed {
-                    command: "glab mr list".to_string(),
-                    stderr: e.to_string(),
-                })?;
+            let mut all = Vec::new();
+            let mut page = 1;
 
-            if !output.status.success() {
-                return Err(ScmError::CommandFailed {
-                    command: "glab mr list".to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                });
+            loop {
+                let output = Command::new("glab")
+                    .args(Self::mr_list_args(page))
+                    .current_dir(&repo.local_path)
+                    .output()
+                    .await
+                    .map_err(|e| ScmError::CommandFailed {
+                        command: "glab mr list".to_string(),
+                        stderr: e.to_string(),
+                    })?;
+
+                if !output.status.success() {
+                    return Err(ScmError::CommandFailed {
+                        command: "glab mr list".to_string(),
+                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    });
+                }
+
+                let mut mrs = parse_gitlab_merge_requests_for_repo(
+                    repo,
+                    &String::from_utf8_lossy(&output.stdout),
+                )?;
+                let count = mrs.len();
+                all.append(&mut mrs);
+
+                if count < GITLAB_MR_PER_PAGE {
+                    break;
+                }
+                page += 1;
             }
 
-            parse_gitlab_merge_requests(&repo.name, &String::from_utf8_lossy(&output.stdout))
+            Ok(all)
         }
         .boxed()
     }
@@ -326,6 +371,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_gitlab_merge_requests_with_repo_path() {
+        let repo = ScmRepo {
+            local_path: "/tmp/app".into(),
+            name: "app".into(),
+            remote_url: "git@gitlab.example.com:acme/app.git".into(),
+        };
+
+        let mrs = parse_gitlab_merge_requests_for_repo(&repo, SAMPLE_JSON).unwrap();
+
+        assert_eq!(mrs[0].repo_name, "app");
+        assert_eq!(mrs[0].repo_path, std::path::PathBuf::from("/tmp/app"));
+    }
+
+    #[test]
     fn maps_merge_request_states() {
         let mrs = parse_gitlab_merge_requests("app", SAMPLE_JSON).unwrap();
         assert_eq!(mrs[0].state, MergeRequestState::Draft);
@@ -455,8 +514,17 @@ mod tests {
     #[test]
     fn gitlab_mr_list_args_are_stable() {
         assert_eq!(
-            GitLabScm::mr_list_args(),
-            ["mr", "list", "--state", "opened", "--output", "json"]
+            GitLabScm::mr_list_args(2),
+            vec![
+                "mr",
+                "list",
+                "--output",
+                "json",
+                "--per-page",
+                "100",
+                "--page",
+                "2"
+            ]
         );
     }
 }

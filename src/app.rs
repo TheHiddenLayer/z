@@ -102,8 +102,14 @@ pub enum Action {
     BranchesLoaded {
         branches: Vec<String>,
     },
-    MergeRequestsRefreshed(Vec<MergeRequest>),
-    MergeRequestsFailed(String),
+    MergeRequestsRefreshed {
+        refresh_id: u64,
+        mrs: Vec<MergeRequest>,
+    },
+    MergeRequestsFailed {
+        refresh_id: u64,
+        error: String,
+    },
 
     // System
     Tick,
@@ -169,7 +175,10 @@ pub enum Command {
         agent: Agent,
         resume_cmd: String,
     },
-    RefreshMergeRequests(Vec<PathBuf>),
+    RefreshMergeRequests {
+        refresh_id: u64,
+        repos: Vec<PathBuf>,
+    },
 }
 
 // --- Mode ---
@@ -225,6 +234,7 @@ pub struct App {
 
     // Backpressure: prevent spawning new work when previous is in-flight
     discover_pending: bool,
+    mr_refresh_generation: u64,
 
     // Notification gating
     pub focused: bool,
@@ -247,6 +257,7 @@ impl App {
             dirty: true, // render on first frame
             help_visible: false,
             discover_pending: false,
+            mr_refresh_generation: 0,
             focused: true,
         }
     }
@@ -287,19 +298,41 @@ impl App {
         self.merge_requests.get(self.selected_mr)
     }
 
+    fn agent_matches_mr(agent: &Agent, mr: &MergeRequest) -> bool {
+        let repo_matches = if mr.repo_path.as_os_str().is_empty() {
+            agent.repo_name == mr.repo_name
+        } else {
+            agent.repo_path == mr.repo_path
+        };
+        repo_matches && agent.branch == mr.source_branch
+    }
+
     fn agent_matching_mr(&self, mr: &MergeRequest) -> Option<Agent> {
         self.agents
             .iter()
-            .find(|a| a.repo_name == mr.repo_name && a.branch == mr.source_branch)
+            .find(|a| Self::agent_matches_mr(a, mr))
             .cloned()
     }
 
     fn repo_path_for_mr(&self, mr: &MergeRequest) -> Option<PathBuf> {
-        self.config.resolved_repos().into_iter().find(|repo| {
+        let repos = self.config.resolved_repos();
+        if !mr.repo_path.as_os_str().is_empty() {
+            return repos.into_iter().find(|repo| repo == &mr.repo_path);
+        }
+
+        repos.into_iter().find(|repo| {
             repo.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name == mr.repo_name)
         })
+    }
+
+    fn refresh_merge_requests_command(&mut self) -> Command {
+        self.mr_refresh_generation = self.mr_refresh_generation.wrapping_add(1);
+        Command::RefreshMergeRequests {
+            refresh_id: self.mr_refresh_generation,
+            repos: self.config.resolved_repos(),
+        }
     }
 
     fn prepare_attach_command(&mut self, agent: Agent) -> Command {
@@ -432,7 +465,7 @@ impl App {
                     View::MergeRequests => View::Agents,
                 };
                 if self.view == View::MergeRequests {
-                    cmds.push(Command::RefreshMergeRequests(self.config.resolved_repos()));
+                    cmds.push(self.refresh_merge_requests_command());
                 }
             }
 
@@ -741,7 +774,7 @@ impl App {
                 cmds.push(Command::Discover(self.config.resolved_repos()));
             }
             Action::RefreshMergeRequests => {
-                cmds.push(Command::RefreshMergeRequests(self.config.resolved_repos()));
+                cmds.push(self.refresh_merge_requests_command());
             }
             Action::LaunchSelectedMergeRequest => {
                 let Some(mr) = self.selected_merge_request().cloned() else {
@@ -1000,7 +1033,10 @@ impl App {
                     _ => {}
                 }
             }
-            Action::MergeRequestsRefreshed(mrs) => {
+            Action::MergeRequestsRefreshed { refresh_id, mrs } => {
+                if refresh_id != self.mr_refresh_generation {
+                    return cmds;
+                }
                 self.merge_requests = mrs;
                 if self.selected_mr >= self.merge_requests.len() && !self.merge_requests.is_empty()
                 {
@@ -1010,7 +1046,10 @@ impl App {
                     self.selected_mr = 0;
                 }
             }
-            Action::MergeRequestsFailed(error) => {
+            Action::MergeRequestsFailed { refresh_id, error } => {
+                if refresh_id != self.mr_refresh_generation {
+                    return cmds;
+                }
                 self.status_message = Some(format!("MR refresh: {error}"));
             }
 
@@ -1787,8 +1826,18 @@ mod tests {
         source_branch: &str,
         iid: u64,
     ) -> crate::scm::MergeRequest {
+        mock_merge_request_with_repo_path(repo_name, PathBuf::new(), source_branch, iid)
+    }
+
+    fn mock_merge_request_with_repo_path(
+        repo_name: &str,
+        repo_path: PathBuf,
+        source_branch: &str,
+        iid: u64,
+    ) -> crate::scm::MergeRequest {
         crate::scm::MergeRequest {
             repo_name: repo_name.into(),
+            repo_path,
             iid,
             title: format!("MR {iid}"),
             source_branch: source_branch.into(),
@@ -1810,8 +1859,40 @@ mod tests {
         let cmds = app.update(Action::ToggleView);
         assert_eq!(app.view, View::MergeRequests);
         match cmds.as_slice() {
-            [Command::RefreshMergeRequests(repos)] => assert_eq!(repos.len(), 1),
+            [Command::RefreshMergeRequests { refresh_id, repos }] => {
+                assert_eq!(*refresh_id, 1);
+                assert_eq!(repos.len(), 1);
+            }
             other => panic!("expected MR refresh command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refresh_merge_requests_assigns_increasing_ids() {
+        let mut app = test_app();
+
+        let first = app.update(Action::RefreshMergeRequests);
+        let second = app.update(Action::RefreshMergeRequests);
+
+        match (first.as_slice(), second.as_slice()) {
+            (
+                [
+                    Command::RefreshMergeRequests {
+                        refresh_id: first_id,
+                        ..
+                    },
+                ],
+                [
+                    Command::RefreshMergeRequests {
+                        refresh_id: second_id,
+                        ..
+                    },
+                ],
+            ) => {
+                assert_eq!(*first_id, 1);
+                assert_eq!(*second_id, 2);
+            }
+            other => panic!("expected MR refresh commands, got {other:?}"),
         }
     }
 
@@ -1819,20 +1900,48 @@ mod tests {
     fn merge_requests_refreshed_stores_rows_and_clamps_selection() {
         let mut app = test_app();
         app.view = View::MergeRequests;
+        app.mr_refresh_generation = 4;
         app.selected_mr = 9;
-        app.update(Action::MergeRequestsRefreshed(vec![
-            mock_merge_request("myapp", "feature/a", 1),
-            mock_merge_request("myapp", "feature/b", 2),
-        ]));
+        app.update(Action::MergeRequestsRefreshed {
+            refresh_id: 4,
+            mrs: vec![
+                mock_merge_request("myapp", "feature/a", 1),
+                mock_merge_request("myapp", "feature/b", 2),
+            ],
+        });
         assert_eq!(app.merge_requests.len(), 2);
         assert_eq!(app.selected_mr, 1);
         assert_eq!(app.selected_merge_request().unwrap().iid, 2);
     }
 
     #[test]
+    fn stale_merge_request_refresh_results_are_ignored() {
+        let mut app = test_app();
+        app.mr_refresh_generation = 2;
+        app.merge_requests = vec![mock_merge_request("myapp", "feature/current", 1)];
+
+        app.update(Action::MergeRequestsRefreshed {
+            refresh_id: 1,
+            mrs: vec![mock_merge_request("myapp", "feature/stale", 2)],
+        });
+        app.update(Action::MergeRequestsFailed {
+            refresh_id: 1,
+            error: "old failure".into(),
+        });
+
+        assert_eq!(app.merge_requests.len(), 1);
+        assert_eq!(app.merge_requests[0].source_branch, "feature/current");
+        assert!(app.status_message.is_none());
+    }
+
+    #[test]
     fn mr_refresh_failure_sets_status_message() {
         let mut app = test_app();
-        app.update(Action::MergeRequestsFailed("gitlab unavailable".into()));
+        app.mr_refresh_generation = 3;
+        app.update(Action::MergeRequestsFailed {
+            refresh_id: 3,
+            error: "gitlab unavailable".into(),
+        });
         assert_eq!(
             app.status_message.as_deref(),
             Some("MR refresh: gitlab unavailable")
@@ -1942,6 +2051,54 @@ mod tests {
                 base_branch: None,
                 ..
             } if branch == "feature/a"
+        ));
+    }
+
+    #[test]
+    fn launch_selected_mr_uses_exact_repo_path_when_repo_names_collide() {
+        let mut app = test_app_with_repos(&["~/src/team-a/myapp", "~/src/team-b/myapp"]);
+        let repos = app.config.resolved_repos();
+        app.view = View::MergeRequests;
+        app.merge_requests = vec![mock_merge_request_with_repo_path(
+            "myapp",
+            repos[1].clone(),
+            "feature/a",
+            1,
+        )];
+
+        let cmds = app.update(Action::LaunchSelectedMergeRequest);
+
+        assert_eq!(app.agents[0].repo_path, repos[1]);
+        assert!(matches!(
+            &cmds[0],
+            Command::CreateAgent { repo, .. } if repo == &repos[1]
+        ));
+    }
+
+    #[test]
+    fn launch_selected_mr_matches_agent_by_exact_repo_path_when_repo_names_collide() {
+        let mut app = test_app_with_repos(&["~/src/team-a/myapp", "~/src/team-b/myapp"]);
+        let repos = app.config.resolved_repos();
+        app.view = View::MergeRequests;
+        app.merge_requests = vec![mock_merge_request_with_repo_path(
+            "myapp",
+            repos[1].clone(),
+            "feature/a",
+            1,
+        )];
+        let mut wrong_repo_agent = mock_agent("feature/a");
+        wrong_repo_agent.repo_path = repos[0].clone();
+        let mut right_repo_agent = mock_agent("feature/a");
+        right_repo_agent.repo_path = repos[1].clone();
+        right_repo_agent.session_name = "z-myapp-team-b-feature-a".into();
+        right_repo_agent.status = crate::agent::AgentStatus::Stopped;
+        app.agents = vec![wrong_repo_agent, right_repo_agent];
+
+        let cmds = app.update(Action::LaunchSelectedMergeRequest);
+
+        assert!(matches!(
+            &cmds[0],
+            Command::PrepareAttach { agent, .. } if agent.repo_path == repos[1]
         ));
     }
 
