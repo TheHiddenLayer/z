@@ -2,6 +2,7 @@ mod config;
 mod agent;
 mod app;
 mod notifications;
+#[allow(dead_code)]
 mod scm;
 mod style;
 mod ui;
