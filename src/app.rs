@@ -679,7 +679,14 @@ impl App {
                             self.status_message =
                                 Some(format!("Already starting: {}", agent.branch));
                         }
-                        AgentStatus::Stopped | AgentStatus::Error(_) => {
+                        AgentStatus::Stopped => {
+                            self.status_message = Some(format!("Starting: {}", agent.branch));
+                            cmds.push(self.prepare_attach_command(agent));
+                        }
+                        AgentStatus::Error(_) if agent.worktree_path.as_os_str().is_empty() => {
+                            self.status_message = Some(format!("Failed: {}", agent.branch));
+                        }
+                        AgentStatus::Error(_) => {
                             self.status_message = Some(format!("Starting: {}", agent.branch));
                             cmds.push(self.prepare_attach_command(agent));
                         }
@@ -1715,6 +1722,23 @@ mod tests {
             app.status_message.as_deref(),
             Some("Already starting: feature/a")
         );
+    }
+
+    #[test]
+    fn launch_selected_mr_ignores_matching_failed_agent_without_worktree() {
+        let mut app = test_app();
+        app.view = View::MergeRequests;
+        app.merge_requests = vec![mock_merge_request("myapp", "feature/a", 1)];
+        let mut agent = mock_agent("feature/a");
+        agent.status = crate::agent::AgentStatus::Error("create failed".into());
+        agent.worktree_path = PathBuf::new();
+        app.agents = vec![agent];
+
+        let cmds = app.update(Action::LaunchSelectedMergeRequest);
+
+        assert!(cmds.is_empty());
+        assert_eq!(app.agents.len(), 1);
+        assert_eq!(app.status_message.as_deref(), Some("Failed: feature/a"));
     }
 
     #[test]
