@@ -119,13 +119,15 @@ fn infer_gitlab_state(mr: &GitLabMergeRequest) -> MergeRequestState {
         return MergeRequestState::Draft;
     }
 
-    let pipeline_status = mr
-        .pipeline
-        .as_ref()
-        .or(mr.head_pipeline.as_ref())
-        .map(|p| p.status.as_str());
+    let pipeline_statuses = [
+        mr.pipeline.as_ref().map(|p| p.status.as_str()),
+        mr.head_pipeline.as_ref().map(|p| p.status.as_str()),
+    ];
 
-    if matches!(pipeline_status, Some("failed")) {
+    if pipeline_statuses
+        .iter()
+        .any(|status| matches!(status, Some("failed")))
+    {
         return MergeRequestState::CiFailed;
     }
 
@@ -133,7 +135,10 @@ fn infer_gitlab_state(mr: &GitLabMergeRequest) -> MergeRequestState {
         return MergeRequestState::Review;
     }
 
-    if matches!(pipeline_status, Some("success")) {
+    if pipeline_statuses
+        .iter()
+        .any(|status| matches!(status, Some("success")))
+    {
         return MergeRequestState::Ready;
     }
 
@@ -230,6 +235,46 @@ mod tests {
             "https://gitlab.example.com/acme/app/-/merge_requests/7"
         );
         assert_eq!(mrs[0].state, MergeRequestState::Draft);
+    }
+
+    #[test]
+    fn failed_head_pipeline_takes_precedence_over_success_pipeline() {
+        let json = r#"[{
+          "iid": 8,
+          "title": "Pipeline precedence",
+          "source_branch": "pipeline/precedence",
+          "target_branch": "main",
+          "web_url": "https://gitlab.example.com/acme/app/-/merge_requests/8",
+          "pipeline": { "status": "success" },
+          "headPipeline": { "status": "failed" }
+        }]"#;
+        let mrs = parse_gitlab_merge_requests("app", json).unwrap();
+        assert_eq!(mrs[0].state, MergeRequestState::CiFailed);
+    }
+
+    #[test]
+    fn accepts_camel_case_state_fields() {
+        let json = r#"[
+          {
+            "iid": 9,
+            "title": "Head pipeline success",
+            "source_branch": "head/success",
+            "target_branch": "main",
+            "web_url": "https://gitlab.example.com/acme/app/-/merge_requests/9",
+            "headPipeline": { "status": "success" }
+          },
+          {
+            "iid": 10,
+            "title": "Blocking discussions",
+            "source_branch": "blocking/discussions",
+            "target_branch": "main",
+            "web_url": "https://gitlab.example.com/acme/app/-/merge_requests/10",
+            "blockingDiscussionsResolved": false
+          }
+        ]"#;
+        let mrs = parse_gitlab_merge_requests("app", json).unwrap();
+        assert_eq!(mrs[0].state, MergeRequestState::Ready);
+        assert_eq!(mrs[1].state, MergeRequestState::Review);
     }
 
     #[test]
