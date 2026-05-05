@@ -434,6 +434,31 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                 let _ = tx.send(Action::AttachReady(agent));
             });
         }
+        Command::RefreshMr { key, .. } => {
+            let _ = tx.send(Action::MrRefreshed {
+                key,
+                snapshot: crate::app::MrSnapshot::Missing,
+            });
+        }
+        Command::CreateMr { key, .. } => {
+            let _ = tx.send(Action::MrRefreshed {
+                key,
+                snapshot: crate::app::MrSnapshot::Error("MR create not wired".into()),
+            });
+        }
+        Command::OpenMr { .. } => {}
+        Command::MergeMr { key, .. } => {
+            let _ = tx.send(Action::MrRefreshed {
+                key,
+                snapshot: crate::app::MrSnapshot::Error("MR merge not wired".into()),
+            });
+        }
+        Command::StartAgentIntent { agent, .. } => {
+            let _ = tx.send(Action::AgentFailed {
+                session: agent.session_name.clone(),
+                error: "agent intent not wired".into(),
+            });
+        }
         Command::Attach(_) => unreachable!("Attach handled by dispatch"),
     }
 }

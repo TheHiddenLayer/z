@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::agent::{self, Agent, AgentStatus};
 use crate::config::Config;
+use crate::gitlab::{MergeRequest, MrDisplayKind, classify};
 use crate::notifications;
 
 fn chrono_free_date_str() -> String {
@@ -87,6 +89,17 @@ pub enum Action {
     BranchesLoaded {
         branches: Vec<String>,
     },
+    TogglePreview,
+    RefreshMrs,
+    MrRefreshed {
+        key: MrKey,
+        snapshot: MrSnapshot,
+    },
+    MrCreate,
+    MrOpen,
+    MrMerge,
+    MrMergeConfirmed,
+    MrIntent(MrIntent),
 
     // System
     Tick,
@@ -108,6 +121,39 @@ pub enum NewAgentFocus {
     BranchList,
     Name,
     Prompt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MrKey {
+    pub repo_path: PathBuf,
+    pub branch: String,
+}
+
+impl MrKey {
+    pub fn new(repo_path: PathBuf, branch: String) -> Self {
+        Self { repo_path, branch }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MrSnapshot {
+    Missing,
+    Ready(MergeRequest),
+    Error(String),
+    Refreshing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewMode {
+    Terminal,
+    MergeRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MrIntent {
+    Rebase,
+    MakeReady,
+    ReviewFix,
 }
 
 fn generate_branch_name(branches: &[String], date_str: &str) -> String {
@@ -147,6 +193,26 @@ pub enum Command {
     },
     Attach(Agent),
     PrepareAttach { agent: Agent, resume_cmd: String },
+    RefreshMr {
+        key: MrKey,
+        source_branch: String,
+    },
+    CreateMr {
+        key: MrKey,
+        source_branch: String,
+        target_branch: String,
+    },
+    OpenMr {
+        id_or_branch: String,
+    },
+    MergeMr {
+        key: MrKey,
+        id_or_branch: String,
+    },
+    StartAgentIntent {
+        agent: Agent,
+        fresh_cmd: String,
+    },
 }
 
 // --- Mode ---
@@ -167,6 +233,7 @@ pub enum Mode {
         agent_name: String,
     },
     ConfirmDelete,
+    ConfirmMerge,
 }
 
 fn find_main_branch(branches: &[String]) -> usize {
@@ -190,9 +257,12 @@ pub struct App {
     pub spinner_frame: usize,
     pub dirty: bool,
     pub help_visible: bool,
+    pub preview_mode: PreviewMode,
+    pub mr_snapshots: HashMap<MrKey, MrSnapshot>,
 
     // Backpressure: prevent spawning new work when previous is in-flight
     discover_pending: bool,
+    mr_refresh_pending: bool,
 
     // Notification gating
     pub focused: bool,
@@ -211,7 +281,10 @@ impl App {
             spinner_frame: 0,
             dirty: true, // render on first frame
             help_visible: false,
+            preview_mode: PreviewMode::Terminal,
+            mr_snapshots: HashMap::new(),
             discover_pending: false,
+            mr_refresh_pending: false,
             focused: true,
         }
     }
@@ -266,6 +339,62 @@ impl App {
         } else {
             None
         }
+    }
+
+    pub fn selected_mr_key(&self) -> Option<MrKey> {
+        let agent = self.selected_agent()?;
+        Some(MrKey::new(agent.repo_path.clone(), agent.branch.clone()))
+    }
+
+    pub fn selected_mr_snapshot(&self) -> Option<&MrSnapshot> {
+        let key = self.selected_mr_key()?;
+        self.mr_snapshots.get(&key)
+    }
+
+    pub fn mr_for_agent(&self, agent: &Agent) -> Option<&MergeRequest> {
+        let key = MrKey::new(agent.repo_path.clone(), agent.branch.clone());
+        match self.mr_snapshots.get(&key) {
+            Some(MrSnapshot::Ready(mr)) => Some(mr),
+            _ => None,
+        }
+    }
+
+    pub fn selected_mr(&self) -> Option<&MergeRequest> {
+        match self.selected_mr_snapshot() {
+            Some(MrSnapshot::Ready(mr)) => Some(mr),
+            _ => None,
+        }
+    }
+
+    pub fn selected_mr_id_or_branch(&self) -> Option<String> {
+        let mr = self.selected_mr()?;
+        Some(mr.iid.map(|iid| iid.to_string()).unwrap_or_else(|| mr.source_branch.clone()))
+    }
+
+    fn refresh_mr_commands(&self) -> Vec<Command> {
+        self.agents
+            .iter()
+            .map(|agent| {
+                let key = MrKey::new(agent.repo_path.clone(), agent.branch.clone());
+                Command::RefreshMr {
+                    key,
+                    source_branch: agent.branch.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn selected_agent_fresh_cmd(&self, prompt: &str) -> Option<String> {
+        let agent = self.selected_agent()?;
+        self.config.fresh(&agent.agent_name, Some(prompt))
+            .or_else(|| self.config.fresh(self.config.default_agent_name(), Some(prompt)))
+    }
+
+    fn selected_base_branch(&self) -> String {
+        self.selected_agent()
+            .and_then(|a| a.base_branch.clone())
+            .or_else(|| self.selected_mr().and_then(|mr| mr.target_branch.clone()))
+            .unwrap_or_else(|| "main".to_string())
     }
 
     /// Core state machine. Returns Commands for side effects to be executed by the caller.
@@ -660,6 +789,12 @@ impl App {
                     }
                 }
                 self.agents = new_agents;
+                if !self.mr_refresh_pending {
+                    self.mr_refresh_pending = true;
+                    for cmd in self.refresh_mr_commands() {
+                        cmds.push(cmd);
+                    }
+                }
                 if self.selected >= self.agents.len() && !self.agents.is_empty() {
                     self.selected = self.agents.len() - 1;
                 }
@@ -761,6 +896,104 @@ impl App {
                 }
             }
 
+            Action::TogglePreview => {
+                self.preview_mode = match self.preview_mode {
+                    PreviewMode::Terminal => PreviewMode::MergeRequest,
+                    PreviewMode::MergeRequest => PreviewMode::Terminal,
+                };
+            }
+            Action::RefreshMrs => {
+                if !self.mr_refresh_pending {
+                    self.mr_refresh_pending = true;
+                    for cmd in self.refresh_mr_commands() {
+                        cmds.push(cmd);
+                    }
+                }
+            }
+            Action::MrRefreshed { key, snapshot } => {
+                self.mr_snapshots.insert(key, snapshot);
+                self.mr_refresh_pending = false;
+            }
+            Action::MrCreate => {
+                if self.selected_mr().is_some() {
+                    self.preview_mode = PreviewMode::MergeRequest;
+                } else if let Some(agent) = self.selected_agent() {
+                    let key = MrKey::new(agent.repo_path.clone(), agent.branch.clone());
+                    cmds.push(Command::CreateMr {
+                        key,
+                        source_branch: agent.branch.clone(),
+                        target_branch: self.selected_base_branch(),
+                    });
+                }
+            }
+            Action::MrOpen => {
+                if let Some(id_or_branch) = self.selected_mr_id_or_branch() {
+                    cmds.push(Command::OpenMr { id_or_branch });
+                } else {
+                    self.status_message = Some("no MR".into());
+                }
+            }
+            Action::MrMerge => {
+                let ready = self
+                    .selected_mr()
+                    .map(|mr| classify(Some(mr)).kind == MrDisplayKind::Ready)
+                    .unwrap_or(false);
+                if ready {
+                    self.mode = Mode::ConfirmMerge;
+                } else {
+                    self.status_message = Some("not ready; use f make-ready".into());
+                }
+            }
+            Action::MrMergeConfirmed => {
+                if let (Some(key), Some(id_or_branch)) =
+                    (self.selected_mr_key(), self.selected_mr_id_or_branch())
+                {
+                    cmds.push(Command::MergeMr { key, id_or_branch });
+                }
+                self.mode = Mode::Normal;
+            }
+            Action::MrIntent(intent) => {
+                if let Some(agent) = self.selected_agent().cloned() {
+                    match agent.status {
+                        AgentStatus::Running => {
+                            self.status_message = Some("agent running; attach or stop first".into());
+                        }
+                        AgentStatus::Creating => {
+                            self.status_message = Some("agent still creating".into());
+                        }
+                        AgentStatus::Error(_) => {
+                            self.status_message = Some("agent errored; delete or restart first".into());
+                        }
+                        AgentStatus::Stopped => {
+                            let prompt = match intent {
+                                MrIntent::Rebase => {
+                                    crate::gitlab::rebase_prompt(&self.selected_base_branch())
+                                }
+                                MrIntent::MakeReady => {
+                                    let url = self
+                                        .selected_mr()
+                                        .and_then(|mr| mr.url.as_deref())
+                                        .unwrap_or("selected merge request");
+                                    crate::gitlab::make_ready_prompt(url)
+                                }
+                                MrIntent::ReviewFix => {
+                                    let url = self
+                                        .selected_mr()
+                                        .and_then(|mr| mr.url.as_deref())
+                                        .unwrap_or("selected merge request");
+                                    crate::gitlab::review_fix_prompt(url)
+                                }
+                            };
+                            if let Some(fresh_cmd) = self.selected_agent_fresh_cmd(&prompt) {
+                                cmds.push(Command::StartAgentIntent { agent, fresh_cmd });
+                            } else {
+                                self.status_message = Some("agent command unavailable".into());
+                            }
+                        }
+                    }
+                }
+            }
+
             // --- System ---
             Action::Tick => {
                 self.spinner_frame = self.spinner_frame.wrapping_add(1);
@@ -828,6 +1061,13 @@ impl App {
                 if self.spinner_frame.is_multiple_of(30) && !self.discover_pending {
                     self.discover_pending = true;
                     cmds.push(Command::Discover(self.config.resolved_repos()));
+                }
+
+                if self.spinner_frame.is_multiple_of(100) && !self.mr_refresh_pending {
+                    self.mr_refresh_pending = true;
+                    for cmd in self.refresh_mr_commands() {
+                        cmds.push(cmd);
+                    }
                 }
             }
             Action::Quit => {
@@ -908,6 +1148,7 @@ impl App {
                 KeyCode::Char('p') => Some(Action::DeleteAll { preserve_tmux: true }),
                 _ => None,
             },
+            Mode::ConfirmMerge => None,
             Mode::NewAgent { focus, .. } => match key.code {
                 KeyCode::Esc => Some(Action::CancelMode),
                 KeyCode::Enter
@@ -2946,5 +3187,125 @@ mod tests {
         }
         let action = app.handle_key(make_key(KeyCode::Char('q')));
         assert!(matches!(action, Some(Action::TypeChar('q'))));
+    }
+
+    #[test]
+    fn refresh_agents_also_requests_mr_refresh() {
+        let mut app = test_app();
+        let cmds = app.update(Action::RefreshAgents);
+        assert!(cmds.iter().any(|c| matches!(c, Command::Discover(_))));
+    }
+
+    #[test]
+    fn agents_refreshed_requests_one_mr_refresh_per_agent() {
+        let mut app = test_app();
+        let cmds = app.update(Action::AgentsRefreshed(vec![mock_agent("fix-auth"), mock_agent("docs")]));
+        let count = cmds.iter().filter(|c| matches!(c, Command::RefreshMr { .. })).count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn mr_refreshed_stores_snapshot_by_repo_and_branch() {
+        let mut app = test_app();
+        let key = MrKey::new("/tmp/repo".into(), "fix-auth".into());
+        app.update(Action::MrRefreshed {
+            key: key.clone(),
+            snapshot: MrSnapshot::Missing,
+        });
+        assert_eq!(app.mr_snapshots.get(&key), Some(&MrSnapshot::Missing));
+    }
+
+    #[test]
+    fn toggle_preview_switches_between_terminal_and_mr() {
+        let mut app = test_app();
+        assert_eq!(app.preview_mode, PreviewMode::Terminal);
+        app.update(Action::TogglePreview);
+        assert_eq!(app.preview_mode, PreviewMode::MergeRequest);
+        app.update(Action::TogglePreview);
+        assert_eq!(app.preview_mode, PreviewMode::Terminal);
+    }
+
+    #[test]
+    fn m_creates_mr_when_selected_agent_has_no_mr() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        let cmds = app.update(Action::MrCreate);
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::CreateMr { source_branch, target_branch, .. }]
+                if source_branch == "fix-auth" && target_branch == "main"
+        ));
+    }
+
+    #[test]
+    fn m_switches_to_mr_preview_when_mr_exists() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        let key = app.selected_mr_key().unwrap();
+        app.mr_snapshots.insert(key, MrSnapshot::Ready(test_mr("fix-auth")));
+        let cmds = app.update(Action::MrCreate);
+        assert!(cmds.is_empty());
+        assert_eq!(app.preview_mode, PreviewMode::MergeRequest);
+    }
+
+    #[test]
+    fn merge_refuses_non_ready_mr() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        let key = app.selected_mr_key().unwrap();
+        let mut mr = test_mr("fix-auth");
+        mr.merge_state = Some("cannot_be_merged".into());
+        app.mr_snapshots.insert(key, MrSnapshot::Ready(mr));
+        let cmds = app.update(Action::MrMerge);
+        assert!(cmds.is_empty());
+        assert_eq!(app.status_message.as_deref(), Some("not ready; use f make-ready"));
+    }
+
+    #[test]
+    fn merge_ready_mr_enters_confirmation() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        let key = app.selected_mr_key().unwrap();
+        let mut mr = test_mr("fix-auth");
+        mr.merge_state = Some("mergeable".into());
+        mr.pipeline_state = Some("success".into());
+        app.mr_snapshots.insert(key, MrSnapshot::Ready(mr));
+        let cmds = app.update(Action::MrMerge);
+        assert!(cmds.is_empty());
+        assert!(matches!(app.mode, Mode::ConfirmMerge));
+    }
+
+    #[test]
+    fn running_agent_intent_is_refused() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        let cmds = app.update(Action::MrIntent(MrIntent::Rebase));
+        assert!(cmds.is_empty());
+        assert_eq!(app.status_message.as_deref(), Some("agent running; attach or stop first"));
+    }
+
+    #[test]
+    fn stopped_agent_intent_starts_session() {
+        let mut app = test_app();
+        let mut agent = mock_agent("fix-auth");
+        agent.status = AgentStatus::Stopped;
+        app.agents = vec![agent];
+        let cmds = app.update(Action::MrIntent(MrIntent::Rebase));
+        assert!(matches!(cmds.as_slice(), [Command::StartAgentIntent { fresh_cmd, .. }] if fresh_cmd.contains("Rebase this worktree")));
+    }
+
+    fn test_mr(branch: &str) -> MergeRequest {
+        MergeRequest {
+            source_branch: branch.to_string(),
+            target_branch: Some("main".into()),
+            iid: Some(1),
+            title: Some("MR".into()),
+            url: Some("https://gitlab.example.com/mr/1".into()),
+            state: crate::gitlab::MrState::Open,
+            draft: Some(false),
+            merge_state: None,
+            pipeline_state: None,
+            unresolved_count: None,
+        }
     }
 }
