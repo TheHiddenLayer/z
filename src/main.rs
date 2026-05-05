@@ -453,12 +453,7 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                 snapshot: crate::app::MrSnapshot::Error("MR merge not wired".into()),
             });
         }
-        Command::StartAgentIntent { agent, .. } => {
-            let _ = tx.send(Action::AgentFailed {
-                session: agent.session_name.clone(),
-                error: "agent intent not wired".into(),
-            });
-        }
+        Command::StartAgentIntent { .. } => {}
         Command::Attach(_) => unreachable!("Attach handled by dispatch"),
     }
 }

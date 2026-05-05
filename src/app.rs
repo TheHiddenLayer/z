@@ -203,6 +203,7 @@ pub enum Command {
         target_branch: String,
     },
     OpenMr {
+        key: MrKey,
         id_or_branch: String,
     },
     MergeMr {
@@ -263,6 +264,7 @@ pub struct App {
     // Backpressure: prevent spawning new work when previous is in-flight
     discover_pending: bool,
     mr_refresh_pending: bool,
+    mr_refresh_outstanding: usize,
 
     // Notification gating
     pub focused: bool,
@@ -285,6 +287,7 @@ impl App {
             mr_snapshots: HashMap::new(),
             discover_pending: false,
             mr_refresh_pending: false,
+            mr_refresh_outstanding: 0,
             focused: true,
         }
     }
@@ -382,6 +385,21 @@ impl App {
                 }
             })
             .collect()
+    }
+
+    fn schedule_mr_refresh(&mut self) -> Vec<Command> {
+        if self.mr_refresh_pending {
+            return Vec::new();
+        }
+        let cmds = self.refresh_mr_commands();
+        if cmds.is_empty() {
+            self.mr_refresh_pending = false;
+            self.mr_refresh_outstanding = 0;
+            return cmds;
+        }
+        self.mr_refresh_pending = true;
+        self.mr_refresh_outstanding = cmds.len();
+        cmds
     }
 
     fn selected_agent_fresh_cmd(&self, prompt: &str) -> Option<String> {
@@ -789,12 +807,7 @@ impl App {
                     }
                 }
                 self.agents = new_agents;
-                if !self.mr_refresh_pending {
-                    self.mr_refresh_pending = true;
-                    for cmd in self.refresh_mr_commands() {
-                        cmds.push(cmd);
-                    }
-                }
+                cmds.extend(self.schedule_mr_refresh());
                 if self.selected >= self.agents.len() && !self.agents.is_empty() {
                     self.selected = self.agents.len() - 1;
                 }
@@ -903,16 +916,14 @@ impl App {
                 };
             }
             Action::RefreshMrs => {
-                if !self.mr_refresh_pending {
-                    self.mr_refresh_pending = true;
-                    for cmd in self.refresh_mr_commands() {
-                        cmds.push(cmd);
-                    }
-                }
+                cmds.extend(self.schedule_mr_refresh());
             }
             Action::MrRefreshed { key, snapshot } => {
                 self.mr_snapshots.insert(key, snapshot);
-                self.mr_refresh_pending = false;
+                self.mr_refresh_outstanding = self.mr_refresh_outstanding.saturating_sub(1);
+                if self.mr_refresh_outstanding == 0 {
+                    self.mr_refresh_pending = false;
+                }
             }
             Action::MrCreate => {
                 if self.selected_mr().is_some() {
@@ -927,8 +938,10 @@ impl App {
                 }
             }
             Action::MrOpen => {
-                if let Some(id_or_branch) = self.selected_mr_id_or_branch() {
-                    cmds.push(Command::OpenMr { id_or_branch });
+                if let (Some(key), Some(id_or_branch)) =
+                    (self.selected_mr_key(), self.selected_mr_id_or_branch())
+                {
+                    cmds.push(Command::OpenMr { key, id_or_branch });
                 } else {
                     self.status_message = Some("no MR".into());
                 }
@@ -970,17 +983,23 @@ impl App {
                                     crate::gitlab::rebase_prompt(&self.selected_base_branch())
                                 }
                                 MrIntent::MakeReady => {
-                                    let url = self
+                                    let Some(url) = self
                                         .selected_mr()
                                         .and_then(|mr| mr.url.as_deref())
-                                        .unwrap_or("selected merge request");
+                                    else {
+                                        self.status_message = Some("no MR".into());
+                                        return cmds;
+                                    };
                                     crate::gitlab::make_ready_prompt(url)
                                 }
                                 MrIntent::ReviewFix => {
-                                    let url = self
+                                    let Some(url) = self
                                         .selected_mr()
                                         .and_then(|mr| mr.url.as_deref())
-                                        .unwrap_or("selected merge request");
+                                    else {
+                                        self.status_message = Some("no MR".into());
+                                        return cmds;
+                                    };
                                     crate::gitlab::review_fix_prompt(url)
                                 }
                             };
@@ -1063,11 +1082,8 @@ impl App {
                     cmds.push(Command::Discover(self.config.resolved_repos()));
                 }
 
-                if self.spinner_frame.is_multiple_of(100) && !self.mr_refresh_pending {
-                    self.mr_refresh_pending = true;
-                    for cmd in self.refresh_mr_commands() {
-                        cmds.push(cmd);
-                    }
+                if self.spinner_frame.is_multiple_of(100) {
+                    cmds.extend(self.schedule_mr_refresh());
                 }
             }
             Action::Quit => {
@@ -3292,6 +3308,77 @@ mod tests {
         app.agents = vec![agent];
         let cmds = app.update(Action::MrIntent(MrIntent::Rebase));
         assert!(matches!(cmds.as_slice(), [Command::StartAgentIntent { fresh_cmd, .. }] if fresh_cmd.contains("Rebase this worktree")));
+    }
+
+    #[test]
+    fn refresh_mrs_with_no_agents_does_not_get_stuck() {
+        let mut app = test_app();
+        let cmds = app.update(Action::RefreshMrs);
+        assert!(cmds.is_empty());
+
+        app.agents = vec![mock_agent("fix-auth")];
+        let cmds = app.update(Action::RefreshMrs);
+        assert_eq!(cmds.iter().filter(|c| matches!(c, Command::RefreshMr { .. })).count(), 1);
+    }
+
+    #[test]
+    fn mr_refresh_stays_pending_until_batch_completes() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth"), mock_agent("docs")];
+        let cmds = app.update(Action::RefreshMrs);
+        assert_eq!(cmds.len(), 2);
+
+        let first_key = MrKey::new("/tmp/repo".into(), "fix-auth".into());
+        let second_key = MrKey::new("/tmp/repo".into(), "docs".into());
+        app.update(Action::MrRefreshed {
+            key: first_key,
+            snapshot: MrSnapshot::Missing,
+        });
+        let cmds = app.update(Action::RefreshMrs);
+        assert!(cmds.is_empty());
+
+        app.update(Action::MrRefreshed {
+            key: second_key,
+            snapshot: MrSnapshot::Missing,
+        });
+        let cmds = app.update(Action::RefreshMrs);
+        assert_eq!(cmds.iter().filter(|c| matches!(c, Command::RefreshMr { .. })).count(), 2);
+    }
+
+    #[test]
+    fn make_ready_without_mr_is_refused() {
+        let mut app = test_app();
+        let mut agent = mock_agent("fix-auth");
+        agent.status = AgentStatus::Stopped;
+        app.agents = vec![agent];
+        let cmds = app.update(Action::MrIntent(MrIntent::MakeReady));
+        assert!(cmds.is_empty());
+        assert_eq!(app.status_message.as_deref(), Some("no MR"));
+    }
+
+    #[test]
+    fn review_fix_without_mr_is_refused() {
+        let mut app = test_app();
+        let mut agent = mock_agent("fix-auth");
+        agent.status = AgentStatus::Stopped;
+        app.agents = vec![agent];
+        let cmds = app.update(Action::MrIntent(MrIntent::ReviewFix));
+        assert!(cmds.is_empty());
+        assert_eq!(app.status_message.as_deref(), Some("no MR"));
+    }
+
+    #[test]
+    fn open_mr_command_carries_repo_key() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        let key = app.selected_mr_key().unwrap();
+        app.mr_snapshots.insert(key.clone(), MrSnapshot::Ready(test_mr("fix-auth")));
+        let cmds = app.update(Action::MrOpen);
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::OpenMr { key: command_key, id_or_branch }]
+                if command_key == &key && id_or_branch == "1"
+        ));
     }
 
     fn test_mr(branch: &str) -> MergeRequest {
