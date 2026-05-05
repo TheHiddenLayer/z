@@ -1,6 +1,7 @@
 mod config;
 mod agent;
 mod app;
+mod gitlab;
 mod notifications;
 mod style;
 mod ui;
