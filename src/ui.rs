@@ -346,7 +346,7 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(vec![
         Cell::from(""),
         Cell::from(""),
-        Cell::from(""),
+        Cell::from(Span::styled("MR", hdr_style)),
         Cell::from(Span::styled("BRANCH", hdr_style)),
         Cell::from(Span::styled("BASE", hdr_style)),
         Cell::from(Span::styled("REPO", hdr_style)),
