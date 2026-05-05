@@ -1148,6 +1148,13 @@ impl App {
                 KeyCode::Char('k') | KeyCode::Up => Some(Action::MoveUp),
                 KeyCode::Char('n') => Some(Action::StartNewAgent),
                 KeyCode::Char('a') | KeyCode::Enter => Some(Action::Attach),
+                KeyCode::Tab => Some(Action::TogglePreview),
+                KeyCode::Char('m') => Some(Action::MrCreate),
+                KeyCode::Char('M') => Some(Action::MrMerge),
+                KeyCode::Char('o') => Some(Action::MrOpen),
+                KeyCode::Char('r') => Some(Action::MrIntent(MrIntent::Rebase)),
+                KeyCode::Char('f') => Some(Action::MrIntent(MrIntent::MakeReady)),
+                KeyCode::Char('v') => Some(Action::MrIntent(MrIntent::ReviewFix)),
                 KeyCode::Char('x') => {
                     self.selected_agent()
                         .filter(|a| a.status.has_session())
@@ -1164,7 +1171,11 @@ impl App {
                 KeyCode::Char('p') => Some(Action::DeleteAll { preserve_tmux: true }),
                 _ => None,
             },
-            Mode::ConfirmMerge => None,
+            Mode::ConfirmMerge => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => Some(Action::CancelMode),
+                KeyCode::Char('y') => Some(Action::MrMergeConfirmed),
+                _ => None,
+            },
             Mode::NewAgent { focus, .. } => match key.code {
                 KeyCode::Esc => Some(Action::CancelMode),
                 KeyCode::Enter
@@ -1782,6 +1793,87 @@ mod tests {
         let action = app.handle_key(make_key(KeyCode::Char('?'))).unwrap();
         app.update(action);
         assert!(!app.help_visible);
+    }
+
+    #[test]
+    fn normal_tab_toggles_preview() {
+        let app = test_app();
+        let action = app.handle_key(make_key(KeyCode::Tab));
+        assert!(matches!(action, Some(Action::TogglePreview)));
+    }
+
+    #[test]
+    fn normal_m_creates_mr() {
+        let app = test_app();
+        let action = app.handle_key(make_key(KeyCode::Char('m')));
+        assert!(matches!(action, Some(Action::MrCreate)));
+    }
+
+    #[test]
+    fn normal_shift_m_starts_mr_merge() {
+        let app = test_app();
+        let action = app.handle_key(make_key(KeyCode::Char('M')));
+        assert!(matches!(action, Some(Action::MrMerge)));
+    }
+
+    #[test]
+    fn normal_o_opens_mr() {
+        let app = test_app();
+        let action = app.handle_key(make_key(KeyCode::Char('o')));
+        assert!(matches!(action, Some(Action::MrOpen)));
+    }
+
+    #[test]
+    fn normal_r_starts_rebase_intent() {
+        let app = test_app();
+        let action = app.handle_key(make_key(KeyCode::Char('r')));
+        assert!(matches!(action, Some(Action::MrIntent(MrIntent::Rebase))));
+    }
+
+    #[test]
+    fn normal_f_starts_make_ready_intent() {
+        let app = test_app();
+        let action = app.handle_key(make_key(KeyCode::Char('f')));
+        assert!(matches!(action, Some(Action::MrIntent(MrIntent::MakeReady))));
+    }
+
+    #[test]
+    fn normal_v_starts_review_fix_intent() {
+        let app = test_app();
+        let action = app.handle_key(make_key(KeyCode::Char('v')));
+        assert!(matches!(action, Some(Action::MrIntent(MrIntent::ReviewFix))));
+    }
+
+    #[test]
+    fn confirmmerge_y_confirms_merge() {
+        let mut app = test_app();
+        app.mode = Mode::ConfirmMerge;
+        let action = app.handle_key(make_key(KeyCode::Char('y')));
+        assert!(matches!(action, Some(Action::MrMergeConfirmed)));
+    }
+
+    #[test]
+    fn confirmmerge_esc_cancels() {
+        let mut app = test_app();
+        app.mode = Mode::ConfirmMerge;
+        let action = app.handle_key(make_key(KeyCode::Esc));
+        assert!(matches!(action, Some(Action::CancelMode)));
+    }
+
+    #[test]
+    fn confirmmerge_q_cancels() {
+        let mut app = test_app();
+        app.mode = Mode::ConfirmMerge;
+        let action = app.handle_key(make_key(KeyCode::Char('q')));
+        assert!(matches!(action, Some(Action::CancelMode)));
+    }
+
+    #[test]
+    fn confirmmerge_ignores_other_keys() {
+        let mut app = test_app();
+        app.mode = Mode::ConfirmMerge;
+        let action = app.handle_key(make_key(KeyCode::Char('n')));
+        assert!(action.is_none());
     }
 
     #[test]
