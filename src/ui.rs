@@ -1,16 +1,16 @@
 use crate::agent::{Agent, AgentStatus};
 use crate::app::{App, Mode, MrSnapshot, PreviewMode};
-use crate::gitlab::{MergeRequest, MrDisplayKind, MrState, classify};
+use crate::gitlab::{classify, MergeRequest, MrDisplayKind, MrState};
 use ratatui::{
-    Frame,
     layout::{Constraint, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
+    Frame,
 };
 
 use crate::style::{
-    BUSY, DIM, FAIL, OK, TEXT, drift_arrow, footer_hint, modal_title, status_color,
+    drift_arrow, footer_hint, modal_title, status_color, BUSY, DIM, FAIL, OK, TEXT,
 };
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
@@ -115,7 +115,7 @@ fn mr_preview_lines(snapshot: Option<&MrSnapshot>) -> Vec<Line<'static>> {
     match snapshot {
         None | Some(MrSnapshot::Missing) => vec![
             Line::from(Span::styled("No merge request.", Style::default().fg(DIM))),
-            Line::from(Span::styled("m create", Style::default().fg(DIM))),
+            Line::from(Span::styled("m create MR", Style::default().fg(DIM))),
         ],
         Some(MrSnapshot::Refreshing) => vec![Line::from(Span::styled(
             "Refreshing merge request...",
@@ -204,6 +204,32 @@ fn render_mr(mr: &MergeRequest) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn mr_status_hints(snapshot: Option<&MrSnapshot>) -> Line<'static> {
+    match snapshot {
+        Some(MrSnapshot::Ready(mr)) => match classify(Some(mr)).kind {
+            MrDisplayKind::Ready => footer_hint(&[
+                ("m", "MR"),
+                ("M", "merge"),
+                ("o", "open"),
+                ("r", "rebase"),
+                ("tab", "preview"),
+            ]),
+            MrDisplayKind::Blocked | MrDisplayKind::Draft | MrDisplayKind::Open => footer_hint(&[
+                ("f", "make-ready"),
+                ("r", "rebase"),
+                ("v", "review-fix"),
+                ("o", "open"),
+                ("tab", "preview"),
+            ]),
+            _ => footer_hint(&[("m", "MR"), ("o", "open"), ("tab", "preview")]),
+        },
+        Some(MrSnapshot::Error(_)) => footer_hint(&[("m", "retry"), ("tab", "preview")]),
+        None | Some(MrSnapshot::Missing | MrSnapshot::Refreshing) => {
+            footer_hint(&[("m", "create MR"), ("tab", "preview"), ("?", "help")])
+        }
+    }
 }
 
 fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
@@ -475,16 +501,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             ("q", "quit"),
         ])
     } else if app.selected_agent().is_some() {
-        footer_hint(&[
-            ("tab", "preview"),
-            ("m", "mr"),
-            ("o", "open"),
-            ("r", "rebase"),
-            ("f", "ready"),
-            ("v", "review"),
-            ("M", "merge"),
-            ("?", "help"),
-        ])
+        mr_status_hints(app.selected_mr_snapshot())
     } else {
         Line::from(Span::styled("?", Style::default().fg(DIM)))
     };
@@ -874,6 +891,7 @@ mod tests {
         let lines = mr_preview_lines(Some(&MrSnapshot::Missing));
 
         assert_eq!(lines[0].spans[0].content, "No merge request.");
+        assert_eq!(lines[1].spans[0].content, "m create MR");
     }
 
     #[test]
@@ -881,16 +899,77 @@ mod tests {
         let mr = test_mr();
         let lines = mr_preview_lines(Some(&MrSnapshot::Ready(mr)));
 
-        assert!(
-            lines
-                .iter()
-                .any(|line| { line.spans.iter().any(|span| span.content.contains("!42")) })
-        );
+        assert!(lines
+            .iter()
+            .any(|line| { line.spans.iter().any(|span| span.content.contains("!42")) }));
         assert!(lines.iter().any(|line| {
             line.spans
                 .iter()
                 .any(|span| span.content.contains("feature/auth"))
         }));
+    }
+
+    #[test]
+    fn mr_status_hints_ready_mr_include_merge() {
+        let mr = test_mr();
+        let line = mr_status_hints(Some(&MrSnapshot::Ready(mr)));
+
+        assert_eq!(
+            hint_text(&line),
+            "m MR · M merge · o open · r rebase · tab preview"
+        );
+    }
+
+    #[test]
+    fn mr_status_hints_blocked_draft_open_mr_include_intents() {
+        let mut mr = test_mr();
+        mr.merge_state = Some("cannot_be_merged".into());
+        let line = mr_status_hints(Some(&MrSnapshot::Ready(mr)));
+
+        assert_eq!(
+            hint_text(&line),
+            "f make-ready · r rebase · v review-fix · o open · tab preview"
+        );
+    }
+
+    #[test]
+    fn mr_status_hints_other_ready_snapshot_kind_is_basic_mr_actions() {
+        let mut mr = test_mr();
+        mr.state = MrState::Merged;
+        let line = mr_status_hints(Some(&MrSnapshot::Ready(mr)));
+
+        assert_eq!(hint_text(&line), "m MR · o open · tab preview");
+    }
+
+    #[test]
+    fn mr_status_hints_error_can_retry() {
+        let snapshot = MrSnapshot::Error("boom".into());
+        let line = mr_status_hints(Some(&snapshot));
+
+        assert_eq!(hint_text(&line), "m retry · tab preview");
+    }
+
+    #[test]
+    fn mr_status_hints_missing_none_refreshing_can_create() {
+        assert_eq!(
+            hint_text(&mr_status_hints(None)),
+            "m create MR · tab preview · ? help"
+        );
+        assert_eq!(
+            hint_text(&mr_status_hints(Some(&MrSnapshot::Missing))),
+            "m create MR · tab preview · ? help"
+        );
+        assert_eq!(
+            hint_text(&mr_status_hints(Some(&MrSnapshot::Refreshing))),
+            "m create MR · tab preview · ? help"
+        );
+    }
+
+    fn hint_text(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 
     fn test_mr() -> MergeRequest {
