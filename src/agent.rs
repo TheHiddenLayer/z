@@ -123,16 +123,13 @@ impl Agent {
     pub fn shows_spinner(&self) -> bool {
         match self.status {
             AgentStatus::Creating => true,
-            AgentStatus::Running => {
-                match (self.seen_activity_since_seed, self.last_pane_hash) {
-                    (true, Some(_)) => self.quiet_captures < QUIET_THRESHOLD,
-                    (false, Some(_)) => {
-                        self.was_spinner_visible
-                            && self.quiet_captures < QUIET_THRESHOLD
-                    }
-                    (_, None) => self.was_spinner_visible,
+            AgentStatus::Running => match (self.seen_activity_since_seed, self.last_pane_hash) {
+                (true, Some(_)) => self.quiet_captures < QUIET_THRESHOLD,
+                (false, Some(_)) => {
+                    self.was_spinner_visible && self.quiet_captures < QUIET_THRESHOLD
                 }
-            }
+                (_, None) => self.was_spinner_visible,
+            },
             AgentStatus::Stopped | AgentStatus::Error(_) => false,
         }
     }
@@ -243,8 +240,8 @@ pub fn discover_agents(
         .filter(|(wt, _)| !wt.is_main)
         .map(|(wt, agent_name)| {
             let branch = wt.branch.as_deref().unwrap_or("detached");
-            let slug = worktree_slug(repo_path, &wt.path)
-                .unwrap_or_else(|| branch.replace('/', "-"));
+            let slug =
+                worktree_slug(repo_path, &wt.path).unwrap_or_else(|| branch.replace('/', "-"));
             let sess_name = format!("{TMUX_PREFIX}-{repo_name}-{slug}");
             let session = sessions.iter().find(|s| s.name == sess_name);
 
@@ -293,7 +290,9 @@ pub async fn list_worktrees(repo_path: &Path) -> Result<Vec<Worktree>, String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(parse_worktree_list(&String::from_utf8_lossy(&output.stdout)))
+    Ok(parse_worktree_list(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 pub async fn fetch_origin(repo_path: &Path) -> Result<(), String> {
@@ -354,7 +353,12 @@ pub async fn list_sessions() -> Vec<TmuxSession> {
     // capture-pane content-hash polling via shows_spinner()'s observation
     // counters; window_activity's 1s granularity is too coarse.
     let output = Command::new("tmux")
-        .args(["list-windows", "-a", "-F", "#{session_name}\t#{session_path}"])
+        .args([
+            "list-windows",
+            "-a",
+            "-F",
+            "#{session_name}\t#{session_path}",
+        ])
         .output()
         .await;
     match output {
@@ -425,7 +429,11 @@ pub async fn create_worktree(
             let has_remote = Command::new("git")
                 .arg("-C")
                 .arg(repo_path)
-                .args(["rev-parse", "--verify", &format!("refs/remotes/{remote_ref}")])
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/remotes/{remote_ref}"),
+                ])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
@@ -519,12 +527,30 @@ pub async fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(
     Ok(())
 }
 
-pub async fn create_session(name: &str, working_dir: &Path, command: Option<&str>) -> Result<(), String> {
+pub async fn create_session(
+    name: &str,
+    working_dir: &Path,
+    command: Option<&str>,
+) -> Result<(), String> {
     let dir_str = working_dir.to_str().ok_or("non-utf8 path")?;
     let mut cmd = Command::new("tmux");
-    cmd.args(["set-option", "-g", "history-limit", "50000", ";",
-              "new-session", "-d", "-s", name, "-c", dir_str]);
-    let output = cmd.output().await.map_err(|e| format!("tmux failed: {e}"))?;
+    cmd.args([
+        "set-option",
+        "-g",
+        "history-limit",
+        "50000",
+        ";",
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-c",
+        dir_str,
+    ]);
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("tmux failed: {e}"))?;
     if !output.status.success() {
         return Err(format!(
             "tmux new-session failed: {}",
@@ -533,11 +559,11 @@ pub async fn create_session(name: &str, working_dir: &Path, command: Option<&str
     }
 
     // Keep the tmux session alive after the agent process exits.
-    if let Some(shell_command) = command {
-        if let Err(e) = send_shell_command(name, shell_command).await {
-            let _ = kill_session(name).await;
-            return Err(e);
-        }
+    if let Some(shell_command) = command
+        && let Err(e) = send_shell_command(name, shell_command).await
+    {
+        let _ = kill_session(name).await;
+        return Err(e);
     }
 
     Ok(())
@@ -591,7 +617,13 @@ pub async fn kill_session(name: &str) -> Result<(), String> {
 /// "active" signal that pane reflow produces.
 pub async fn session_attached_count(session: &str) -> Option<u32> {
     let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", session, "#{session_attached}"])
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{session_attached}",
+        ])
         .output()
         .await
         .ok()?;
@@ -626,7 +658,9 @@ pub async fn capture_pane(session: &str) -> Option<String> {
 /// start flowing. Once set, subsequent z runs in the same server work
 /// immediately.
 pub fn enable_tmux_focus_events() {
-    if std::env::var_os("TMUX").is_none() { return; }
+    if std::env::var_os("TMUX").is_none() {
+        return;
+    }
     let _ = std::process::Command::new("tmux")
         .args(["set-option", "-g", "focus-events", "on"])
         .stdout(std::process::Stdio::null())
@@ -668,7 +702,9 @@ async fn read_z_meta(worktree_path: &Path) -> Option<(String, Option<String>)> {
     let mut agent_name: Option<String> = None;
     let mut base: Option<String> = None;
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Some((key, val)) = line.split_once(' ') else { continue };
+        let Some((key, val)) = line.split_once(' ') else {
+            continue;
+        };
         let val = val.trim();
         match key {
             "z.agent" => agent_name = Some(val.to_string()),
@@ -686,10 +722,8 @@ pub async fn discover_all(repos: &[PathBuf]) -> Vec<Agent> {
         .iter()
         .map(|repo| async move { (repo.clone(), list_worktrees(repo).await) })
         .collect();
-    let (sessions, worktree_results) = tokio::join!(
-        sessions_fut,
-        futures::future::join_all(worktree_futs)
-    );
+    let (sessions, worktree_results) =
+        tokio::join!(sessions_fut, futures::future::join_all(worktree_futs));
 
     let mut all_agents = Vec::new();
     for (repo_path, result) in worktree_results {
@@ -699,9 +733,8 @@ pub async fn discover_all(repos: &[PathBuf]) -> Vec<Agent> {
         // returns both `z.agent` (z-managed marker) and `z.base` together,
         // halving subprocess cost vs. the previous two-pass design.
         let non_main: Vec<Worktree> = worktrees.into_iter().filter(|wt| !wt.is_main).collect();
-        let metas = futures::future::join_all(
-            non_main.iter().map(|wt| read_z_meta(&wt.path))
-        ).await;
+        let metas =
+            futures::future::join_all(non_main.iter().map(|wt| read_z_meta(&wt.path))).await;
         let triples: Vec<(Worktree, String, Option<String>)> = non_main
             .into_iter()
             .zip(metas)
@@ -865,10 +898,13 @@ detached
         let repo = tmp.join("repo");
         let run = |args: &[&str], cwd: &Path| {
             let status = std::process::Command::new("git")
-                .arg("-C").arg(cwd).args(args)
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .status().unwrap();
+                .status()
+                .unwrap();
             assert!(status.success(), "git {args:?} in {cwd:?}");
         };
 
@@ -879,8 +915,20 @@ detached
 
         let z_wt = tmp.join("z-wt");
         let ext_wt = tmp.join("ext-wt");
-        run(&["worktree", "add", z_wt.to_str().unwrap(), "-b", "z-branch"], &repo);
-        run(&["worktree", "add", ext_wt.to_str().unwrap(), "-b", "ext-branch"], &repo);
+        run(
+            &["worktree", "add", z_wt.to_str().unwrap(), "-b", "z-branch"],
+            &repo,
+        );
+        run(
+            &[
+                "worktree",
+                "add",
+                ext_wt.to_str().unwrap(),
+                "-b",
+                "ext-branch",
+            ],
+            &repo,
+        );
         run(&["config", "--worktree", "z.agent", "claude"], &z_wt);
         run(&["config", "--worktree", "z.base", "main"], &z_wt);
 
@@ -1004,7 +1052,7 @@ detached
             quiet_captures: 0,
             seen_activity_since_seed: false,
             was_spinner_visible: false,
-                consecutive_emits: 0,
+            consecutive_emits: 0,
         };
         assert_eq!(a.quiet_captures, 0);
         assert!(!a.seen_activity_since_seed);
@@ -1032,7 +1080,7 @@ detached
             quiet_captures: 0,
             seen_activity_since_seed: false,
             was_spinner_visible: false,
-                consecutive_emits: 0,
+            consecutive_emits: 0,
         }
     }
 
@@ -1064,12 +1112,13 @@ detached
         a.quiet_captures = 999; // not consulted in the (_, None) branch
 
         a.was_spinner_visible = true;
-        assert!(a.shows_spinner(),
-            "post-detach active agent must keep its spinner");
+        assert!(
+            a.shows_spinner(),
+            "post-detach active agent must keep its spinner"
+        );
 
         a.was_spinner_visible = false;
-        assert!(!a.shows_spinner(),
-            "post-detach idle agent must stay idle");
+        assert!(!a.shows_spinner(), "post-detach idle agent must stay idle");
     }
 
     #[test]

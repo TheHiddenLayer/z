@@ -1,16 +1,16 @@
 use crate::agent::{Agent, AgentStatus};
 use crate::app::{App, Mode, MrSnapshot, PreviewMode};
-use crate::gitlab::{classify, MergeRequest, MrDisplayKind, MrState};
+use crate::gitlab::{MergeRequest, MrDisplayKind, MrState, classify};
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
-    Frame,
 };
 
 use crate::style::{
-    drift_arrow, footer_hint, modal_title, status_color, BUSY, DIM, FAIL, OK, TEXT,
+    BUSY, DIM, FAIL, OK, TEXT, drift_arrow, footer_hint, modal_title, status_color,
 };
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
@@ -117,10 +117,6 @@ fn mr_preview_lines(snapshot: Option<&MrSnapshot>) -> Vec<Line<'static>> {
             Line::from(Span::styled("No merge request.", Style::default().fg(DIM))),
             Line::from(Span::styled("m create MR", Style::default().fg(DIM))),
         ],
-        Some(MrSnapshot::Refreshing) => vec![Line::from(Span::styled(
-            "Refreshing merge request...",
-            Style::default().fg(BUSY),
-        ))],
         Some(MrSnapshot::Error(error)) => vec![
             Line::from(Span::styled(
                 "Merge request error",
@@ -226,7 +222,7 @@ fn mr_status_hints(snapshot: Option<&MrSnapshot>) -> Line<'static> {
             _ => footer_hint(&[("m", "MR"), ("o", "open"), ("tab", "preview")]),
         },
         Some(MrSnapshot::Error(_)) => footer_hint(&[("m", "retry"), ("tab", "preview")]),
-        None | Some(MrSnapshot::Missing | MrSnapshot::Refreshing) => {
+        None | Some(MrSnapshot::Missing) => {
             footer_hint(&[("m", "create MR"), ("tab", "preview"), ("?", "help")])
         }
     }
@@ -545,7 +541,7 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         BranchMode::New => branches,
         BranchMode::Existing => existing_branches,
     };
-    let list_height = active_list.len().min(6).max(1) as u16;
+    let list_height = active_list.len().clamp(1, 6) as u16;
 
     let show_name = matches!(branch_mode, BranchMode::New);
     let name_rows = if show_name { 2 } else { 0 }; // row + gap
@@ -899,9 +895,11 @@ mod tests {
         let mr = test_mr();
         let lines = mr_preview_lines(Some(&MrSnapshot::Ready(mr)));
 
-        assert!(lines
-            .iter()
-            .any(|line| { line.spans.iter().any(|span| span.content.contains("!42")) }));
+        assert!(
+            lines
+                .iter()
+                .any(|line| { line.spans.iter().any(|span| span.content.contains("!42")) })
+        );
         assert!(lines.iter().any(|line| {
             line.spans
                 .iter()
@@ -950,17 +948,13 @@ mod tests {
     }
 
     #[test]
-    fn mr_status_hints_missing_none_refreshing_can_create() {
+    fn mr_status_hints_missing_none_can_create() {
         assert_eq!(
             hint_text(&mr_status_hints(None)),
             "m create MR · tab preview · ? help"
         );
         assert_eq!(
             hint_text(&mr_status_hints(Some(&MrSnapshot::Missing))),
-            "m create MR · tab preview · ? help"
-        );
-        assert_eq!(
-            hint_text(&mr_status_hints(Some(&MrSnapshot::Refreshing))),
             "m create MR · tab preview · ? help"
         );
     }

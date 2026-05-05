@@ -245,18 +245,6 @@ pub fn view_args(id_or_branch: &str) -> Vec<String> {
     strings(&["mr", "view", id_or_branch, "--output", "json"])
 }
 
-pub fn view_comments_args(id_or_branch: &str) -> Vec<String> {
-    strings(&[
-        "mr",
-        "view",
-        id_or_branch,
-        "--comments",
-        "--unresolved",
-        "--output",
-        "json",
-    ])
-}
-
 pub fn create_args(source_branch: &str, target_branch: &str) -> Vec<String> {
     strings(&[
         "mr",
@@ -276,10 +264,6 @@ pub fn open_args(id_or_branch: &str) -> Vec<String> {
 
 pub fn merge_args(id_or_branch: &str) -> Vec<String> {
     strings(&["mr", "merge", id_or_branch, "--yes"])
-}
-
-pub fn note_args(id_or_branch: &str, message: &str) -> Vec<String> {
-    strings(&["mr", "note", id_or_branch, "--message", message])
 }
 
 pub fn rebase_prompt(target_branch: &str) -> String {
@@ -429,6 +413,16 @@ mod tests {
         let d = classify(Some(&mr));
         assert_eq!(d.glyph, "R");
         assert_eq!(d.kind, MrDisplayKind::Ready);
+    }
+
+    #[test]
+    fn classify_failed_pipeline_blocks_merge() {
+        let mut mr = mr("feature/x");
+        mr.merge_state = Some("mergeable".into());
+        mr.pipeline_state = Some("failed".into());
+        let d = classify(Some(&mr));
+        assert_eq!(d.glyph, "B");
+        assert_eq!(d.kind, MrDisplayKind::Blocked);
     }
 
     #[test]
