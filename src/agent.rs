@@ -348,6 +348,60 @@ pub async fn list_branches(repo_path: &Path) -> Result<Vec<String>, String> {
     Ok(seen.into_iter().collect())
 }
 
+async fn git_ref_exists(repo_path: &Path, ref_name: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-parse", "--verify", ref_name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+async fn fetch_ref(
+    repo_path: &Path,
+    source_ref: &str,
+    destination_ref: &str,
+) -> Result<(), String> {
+    let refspec = format!("{source_ref}:{destination_ref}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["fetch", "origin", &refspec])
+        .output()
+        .await
+        .map_err(|e| format!("failed to run git: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git fetch failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_ref_name(ref_name: &str, label: &str) -> Result<(), String> {
+    let check = Command::new("git")
+        .args(["check-ref-format", ref_name])
+        .output()
+        .await
+        .map_err(|e| format!("git failed: {e}"))?;
+    if !check.status.success() {
+        return Err(format!("invalid {label}: {ref_name}"));
+    }
+    Ok(())
+}
+
+fn tracking_ref_for_source_ref(source_ref: &str) -> Result<String, String> {
+    let suffix = source_ref
+        .strip_prefix("refs/")
+        .ok_or_else(|| format!("source ref must start with refs/: {source_ref}"))?;
+    Ok(format!("refs/remotes/origin/{suffix}"))
+}
+
 pub async fn list_sessions() -> Vec<TmuxSession> {
     // We only need session existence + path here. Activity is driven by
     // capture-pane content-hash polling via shows_spinner()'s observation
@@ -375,6 +429,7 @@ pub async fn create_worktree(
     new_branch: bool,
     base_branch: Option<&str>,
     agent_name: &str,
+    source_ref: Option<&str>,
 ) -> Result<PathBuf, String> {
     // Validate branch name against git's own rules
     let check = Command::new("git")
@@ -417,6 +472,24 @@ pub async fn create_worktree(
         .await
         .map_err(|e| format!("mkdir failed: {e}"))?;
 
+    let existing_branch_start_ref =
+        if new_branch || git_ref_exists(repo_path, &format!("refs/heads/{branch}")).await {
+            None
+        } else {
+            fetch_origin(repo_path).await?;
+            if git_ref_exists(repo_path, &format!("refs/remotes/origin/{branch}")).await {
+                None
+            } else if let Some(source_ref) = source_ref {
+                validate_ref_name(source_ref, "source ref").await?;
+                let tracking_ref = tracking_ref_for_source_ref(source_ref)?;
+                validate_ref_name(&tracking_ref, "tracking ref").await?;
+                fetch_ref(repo_path, source_ref, &tracking_ref).await?;
+                Some(tracking_ref)
+            } else {
+                None
+            }
+        };
+
     let wt_str = worktree_path.to_str().ok_or("non-utf8 path")?;
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo_path);
@@ -446,6 +519,8 @@ pub async fn create_worktree(
                 cmd.arg(base);
             }
         }
+    } else if let Some(start_ref) = existing_branch_start_ref.as_deref() {
+        cmd.args(["worktree", "add", wt_str, "-b", branch, start_ref]);
     } else {
         cmd.args(["worktree", "add", wt_str, branch]);
     }
@@ -943,6 +1018,131 @@ detached
             None,
             "external worktree without z.agent should yield None",
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("z-{label}-{}-{nanos}", std::process::id()))
+    }
+
+    fn run_git(args: &[&str], cwd: &Path) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} in {cwd:?}");
+    }
+
+    fn setup_remote_repo(label: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let tmp = unique_test_dir(label);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let origin = tmp.join("origin.git");
+        let repo = tmp.join("repo");
+        let peer = tmp.join("peer");
+        run_git(&["init", "-q", "--bare", "origin.git"], &tmp);
+        run_git(
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
+            &tmp,
+        );
+        run_git(&["config", "user.email", "test@example.com"], &repo);
+        run_git(&["config", "user.name", "Test"], &repo);
+        run_git(&["checkout", "-q", "-b", "main"], &repo);
+        run_git(&["commit", "-q", "--allow-empty", "-m", "init"], &repo);
+        run_git(&["push", "-q", "-u", "origin", "main"], &repo);
+        run_git(&["symbolic-ref", "HEAD", "refs/heads/main"], &origin);
+        run_git(
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                peer.to_str().unwrap(),
+            ],
+            &tmp,
+        );
+        run_git(&["config", "user.email", "test@example.com"], &peer);
+        run_git(&["config", "user.name", "Test"], &peer);
+
+        (tmp, origin, repo, peer)
+    }
+
+    #[tokio::test]
+    async fn create_worktree_fetches_remote_branch_before_existing_branch_launch() {
+        let (tmp, _origin, repo, peer) = setup_remote_repo("remote-branch");
+        run_git(
+            &["checkout", "-q", "-b", "remote-only", "origin/main"],
+            &peer,
+        );
+        run_git(&["commit", "-q", "--allow-empty", "-m", "remote"], &peer);
+        run_git(&["push", "-q", "-u", "origin", "remote-only"], &peer);
+
+        let worktree = create_worktree(&repo, "remote-only", false, Some("main"), "codex", None)
+            .await
+            .unwrap();
+
+        let branch = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap();
+        let base = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(["config", "--worktree", "z.base"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&branch.stdout).trim(),
+            "remote-only"
+        );
+        assert_eq!(String::from_utf8_lossy(&base.stdout).trim(), "main");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn create_worktree_can_launch_from_explicit_mr_source_ref() {
+        let (tmp, _origin, repo, peer) = setup_remote_repo("mr-source-ref");
+        run_git(&["checkout", "-q", "-b", "fork-mr", "origin/main"], &peer);
+        run_git(&["commit", "-q", "--allow-empty", "-m", "fork"], &peer);
+        run_git(
+            &["push", "-q", "origin", "HEAD:refs/merge-requests/42/head"],
+            &peer,
+        );
+
+        let worktree = create_worktree(
+            &repo,
+            "fork-mr",
+            false,
+            Some("main"),
+            "codex",
+            Some("refs/merge-requests/42/head"),
+        )
+        .await
+        .unwrap();
+
+        let branch = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "fork-mr");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

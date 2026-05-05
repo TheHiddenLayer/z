@@ -158,6 +158,7 @@ pub enum Command {
         branch: String,
         new_branch: bool,
         base_branch: Option<String>,
+        source_ref: Option<String>,
         session_name: String,
         agent_name: String,
         fresh_cmd: String,
@@ -692,6 +693,7 @@ impl App {
                         branch,
                         new_branch,
                         base_branch,
+                        source_ref: None,
                         session_name: sess_name,
                         agent_name,
                         fresh_cmd,
@@ -866,7 +868,8 @@ impl App {
                     repo,
                     branch: mr.source_branch,
                     new_branch: false,
-                    base_branch: None,
+                    base_branch: Some(mr.target_branch),
+                    source_ref: Some(format!("refs/merge-requests/{}/head", mr.iid)),
                     session_name,
                     agent_name,
                     fresh_cmd,
@@ -2073,9 +2076,12 @@ mod tests {
             Command::CreateAgent {
                 branch,
                 new_branch: false,
-                base_branch: None,
+                base_branch: Some(base_branch),
+                source_ref: Some(source_ref),
                 ..
             } if branch == "feature/a"
+                && base_branch == "main"
+                && source_ref == "refs/merge-requests/1/head"
         ));
     }
 

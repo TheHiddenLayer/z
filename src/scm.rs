@@ -83,6 +83,8 @@ struct GitLabMergeRequest {
     pipeline: Option<GitLabPipeline>,
     #[serde(default, alias = "headPipeline")]
     head_pipeline: Option<GitLabPipeline>,
+    #[serde(default, alias = "detailedMergeStatus")]
+    detailed_merge_status: Option<String>,
     #[serde(default, alias = "blockingDiscussionsResolved")]
     blocking_discussions_resolved: Option<bool>,
 }
@@ -134,8 +136,18 @@ fn infer_gitlab_state(mr: &GitLabMergeRequest) -> MergeRequestState {
         || mr.work_in_progress
         || mr.title.starts_with("Draft:")
         || mr.title.starts_with("WIP:")
+        || mr.detailed_merge_status.as_deref() == Some("draft_status")
     {
         return MergeRequestState::Draft;
+    }
+
+    match mr.detailed_merge_status.as_deref() {
+        Some("ci_failed") => return MergeRequestState::CiFailed,
+        Some("discussions_not_resolved") | Some("not_approved") | Some("requested_changes") => {
+            return MergeRequestState::Review;
+        }
+        Some("mergeable") => return MergeRequestState::Ready,
+        _ => {}
     }
 
     let pipeline_statuses = [
@@ -452,6 +464,40 @@ mod tests {
         let mrs = parse_gitlab_merge_requests("app", json).unwrap();
         assert_eq!(mrs[0].state, MergeRequestState::Ready);
         assert_eq!(mrs[1].state, MergeRequestState::Review);
+    }
+
+    #[test]
+    fn maps_detailed_merge_status_from_glab_list_json() {
+        let json = r#"[
+          {
+            "iid": 11,
+            "title": "CI failed",
+            "source_branch": "ci/failed",
+            "target_branch": "main",
+            "web_url": "https://gitlab.example.com/acme/app/-/merge_requests/11",
+            "detailed_merge_status": "ci_failed"
+          },
+          {
+            "iid": 12,
+            "title": "Ready",
+            "source_branch": "ready/detail",
+            "target_branch": "main",
+            "web_url": "https://gitlab.example.com/acme/app/-/merge_requests/12",
+            "detailed_merge_status": "mergeable"
+          },
+          {
+            "iid": 13,
+            "title": "Needs discussion resolution",
+            "source_branch": "review/detail",
+            "target_branch": "main",
+            "web_url": "https://gitlab.example.com/acme/app/-/merge_requests/13",
+            "detailed_merge_status": "discussions_not_resolved"
+          }
+        ]"#;
+        let mrs = parse_gitlab_merge_requests("app", json).unwrap();
+        assert_eq!(mrs[0].state, MergeRequestState::CiFailed);
+        assert_eq!(mrs[1].state, MergeRequestState::Ready);
+        assert_eq!(mrs[2].state, MergeRequestState::Review);
     }
 
     #[test]

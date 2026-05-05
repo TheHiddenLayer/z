@@ -372,6 +372,7 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
             branch,
             new_branch,
             base_branch,
+            source_ref,
             session_name,
             agent_name,
             fresh_cmd,
@@ -384,6 +385,7 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                     new_branch,
                     base_branch.as_deref(),
                     &agent_name,
+                    source_ref.as_deref(),
                 )
                 .await
                 {
