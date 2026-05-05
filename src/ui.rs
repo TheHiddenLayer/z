@@ -99,16 +99,21 @@ fn status_glyph(agent: &Agent, frame_idx: usize, _base: Style) -> Span<'static> 
     }
 }
 
-fn mr_glyph(app: &App, agent: &Agent) -> Span<'static> {
+fn mr_status_label(kind: MrDisplayKind) -> &'static str {
+    match kind {
+        MrDisplayKind::None => "",
+        MrDisplayKind::Unknown => "unknown",
+        MrDisplayKind::Draft => "draft",
+        MrDisplayKind::Ready => "ready",
+        MrDisplayKind::Blocked => "blocked",
+        MrDisplayKind::Open => "open",
+        MrDisplayKind::Merged => "merged",
+    }
+}
+
+fn mr_status(app: &App, agent: &Agent, style: Style) -> Span<'static> {
     let display = classify(app.mr_for_agent(agent));
-    let color = match display.kind {
-        MrDisplayKind::None => DIM,
-        MrDisplayKind::Unknown => FAIL,
-        MrDisplayKind::Draft | MrDisplayKind::Open => BUSY,
-        MrDisplayKind::Ready | MrDisplayKind::Merged => OK,
-        MrDisplayKind::Blocked => FAIL,
-    };
-    Span::styled(display.glyph, Style::default().fg(color))
+    Span::styled(mr_status_label(display.kind), style)
 }
 
 fn mr_preview_lines(snapshot: Option<&MrSnapshot>) -> Vec<Line<'static>> {
@@ -287,7 +292,7 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
         0
     };
     let status_w: u16 = 1;
-    let mr_w: u16 = 1;
+    let mr_w: u16 = 7;
 
     let mut rows: Vec<Row> = Vec::new();
 
@@ -335,7 +340,7 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
         rows.push(Row::new(vec![
             Cell::from(Span::styled(indicator, indicator_style)),
             Cell::from(status_glyph(agent, app.spinner_frame, text_style)),
-            Cell::from(mr_glyph(app, agent)),
+            Cell::from(mr_status(app, agent, text_style)),
             Cell::from(branch_cell),
             Cell::from(base_cell),
             Cell::from(Span::styled(agent.repo_name.as_str(), text_style)),
@@ -987,6 +992,28 @@ mod tests {
         assert!(text.contains("Captured MR"));
     }
 
+    #[test]
+    fn mr_column_uses_plain_full_status_labels() {
+        assert_eq!(mr_status_label(MrDisplayKind::None), "");
+        assert_eq!(mr_status_label(MrDisplayKind::Draft), "draft");
+        assert_eq!(mr_status_label(MrDisplayKind::Ready), "ready");
+        assert_eq!(mr_status_label(MrDisplayKind::Blocked), "blocked");
+        assert_eq!(mr_status_label(MrDisplayKind::Open), "open");
+        assert_eq!(mr_status_label(MrDisplayKind::Merged), "merged");
+        assert_eq!(mr_status_label(MrDisplayKind::Unknown), "unknown");
+
+        let config = crate::config::Config::from_toml_str(r#"repos = []"#).unwrap();
+        let mut app = App::new(config);
+        let agent = test_agent("feature/auth");
+        let key = MrKey::new(agent.repo_path.clone(), agent.branch.clone());
+        app.mr_snapshots.insert(key, MrSnapshot::Ready(test_mr()));
+
+        let span = mr_status(&app, &agent, Style::default().fg(TEXT));
+
+        assert_eq!(span.content, "ready");
+        assert_eq!(span.style, Style::default().fg(TEXT));
+    }
+
     fn hint_text(line: &Line<'static>) -> String {
         line.spans
             .iter()
@@ -1020,6 +1047,26 @@ mod tests {
             merge_state: Some("mergeable".into()),
             pipeline_state: Some("success".into()),
             unresolved_count: Some(0),
+        }
+    }
+
+    fn test_agent(branch: &str) -> Agent {
+        Agent {
+            repo_path: "/tmp/repo".into(),
+            repo_name: "repo".into(),
+            branch: branch.into(),
+            base_branch: Some("main".into()),
+            worktree_path: format!("/tmp/repo-worktrees/{branch}").into(),
+            slug: branch.replace('/', "-"),
+            session_name: format!("z-repo-{}", branch.replace('/', "-")),
+            status: AgentStatus::Running,
+            agent_name: "codex".into(),
+            last_pane_hash: None,
+            last_attached_count: None,
+            quiet_captures: 0,
+            seen_activity_since_seed: false,
+            was_spinner_visible: false,
+            consecutive_emits: 0,
         }
     }
 }
