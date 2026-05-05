@@ -230,6 +230,108 @@ fn read_bool_any(v: &Value, keys: &[&str]) -> Option<bool> {
     None
 }
 
+pub fn list_args(source_branch: &str) -> Vec<String> {
+    strings(&[
+        "mr",
+        "list",
+        "--source-branch",
+        source_branch,
+        "--output",
+        "json",
+    ])
+}
+
+pub fn view_args(id_or_branch: &str) -> Vec<String> {
+    strings(&["mr", "view", id_or_branch, "--output", "json"])
+}
+
+pub fn view_comments_args(id_or_branch: &str) -> Vec<String> {
+    strings(&[
+        "mr",
+        "view",
+        id_or_branch,
+        "--comments",
+        "--unresolved",
+        "--output",
+        "json",
+    ])
+}
+
+pub fn create_args(source_branch: &str, target_branch: &str) -> Vec<String> {
+    strings(&[
+        "mr",
+        "create",
+        "--fill",
+        "--source-branch",
+        source_branch,
+        "--target-branch",
+        target_branch,
+        "--yes",
+    ])
+}
+
+pub fn open_args(id_or_branch: &str) -> Vec<String> {
+    strings(&["mr", "view", id_or_branch, "--web"])
+}
+
+pub fn merge_args(id_or_branch: &str) -> Vec<String> {
+    strings(&["mr", "merge", id_or_branch, "--yes"])
+}
+
+pub fn note_args(id_or_branch: &str, message: &str) -> Vec<String> {
+    strings(&["mr", "note", id_or_branch, "--message", message])
+}
+
+pub fn rebase_prompt(target_branch: &str) -> String {
+    format!(
+        "\
+Rebase this worktree's branch onto {target_branch}.
+
+Requirements:
+- fetch the latest refs first
+- perform the rebase in this worktree
+- resolve conflicts while preserving the intended changes on this branch
+- run the relevant focused validation for the files you touched
+- do not merge the merge request
+- stop with a concise summary of what changed and what validation ran"
+    )
+}
+
+pub fn make_ready_prompt(mr_url: &str) -> String {
+    format!(
+        "\
+Make this GitLab merge request ready to merge: {mr_url}.
+
+Requirements:
+- inspect MR status, CI/check failures, branch-behind state, conflicts, and unresolved review feedback
+- update this worktree branch as needed
+- fix issues required for merge readiness
+- run relevant validation
+- push the branch when changes are ready
+- do not merge the merge request
+- stop with a concise summary and any remaining blocker"
+    )
+}
+
+pub fn review_fix_prompt(mr_url: &str) -> String {
+    format!(
+        "\
+Address unresolved review feedback on this GitLab merge request: {mr_url}.
+
+Requirements:
+- inspect unresolved discussions/comments
+- make the requested code changes in this worktree
+- run relevant validation
+- push the branch when changes are ready
+- do not merge the merge request
+- stop with a concise summary of addressed feedback and remaining threads"
+    )
+}
+
+fn strings(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|s| (*s).to_string()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +456,70 @@ mod tests {
         let d = classify(Some(&mr));
         assert_eq!(d.glyph, "\u{2713}");
         assert_eq!(d.kind, MrDisplayKind::Merged);
+    }
+
+    #[test]
+    fn list_args_are_argv_safe() {
+        assert_eq!(
+            list_args("feature/a b"),
+            vec![
+                "mr",
+                "list",
+                "--source-branch",
+                "feature/a b",
+                "--output",
+                "json"
+            ],
+        );
+    }
+
+    #[test]
+    fn create_args_include_source_target_fill_and_yes() {
+        assert_eq!(
+            create_args("feature/x", "main"),
+            vec![
+                "mr",
+                "create",
+                "--fill",
+                "--source-branch",
+                "feature/x",
+                "--target-branch",
+                "main",
+                "--yes",
+            ],
+        );
+    }
+
+    #[test]
+    fn merge_args_confirm_direct_merge() {
+        assert_eq!(
+            merge_args("feature/x"),
+            vec!["mr", "merge", "feature/x", "--yes"],
+        );
+    }
+
+    #[test]
+    fn prompt_rebase_forbids_merge_and_names_target() {
+        let prompt = rebase_prompt("main");
+        assert!(prompt.contains("Rebase this worktree's branch onto main."));
+        assert!(prompt.contains("do not merge the merge request"));
+    }
+
+    #[test]
+    fn prompt_make_ready_names_url_and_pushes() {
+        let prompt = make_ready_prompt("https://gitlab.example/mr/1");
+        assert!(prompt.contains("Make this GitLab merge request ready to merge"));
+        assert!(prompt.contains("https://gitlab.example/mr/1"));
+        assert!(prompt.contains("push the branch when changes are ready"));
+        assert!(prompt.contains("do not merge the merge request"));
+    }
+
+    #[test]
+    fn prompt_review_fix_mentions_unresolved_feedback() {
+        let prompt = review_fix_prompt("https://gitlab.example/mr/2");
+        assert!(prompt.contains("Address unresolved review feedback"));
+        assert!(prompt.contains("inspect unresolved discussions/comments"));
+        assert!(prompt.contains("do not merge the merge request"));
     }
 
     fn mr(source_branch: &str) -> MergeRequest {
