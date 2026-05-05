@@ -68,7 +68,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             frame.render_widget(Clear, modal_area);
             draw_delete_modal(frame, app, modal_area);
         }
-        Mode::ConfirmMerge => {
+        Mode::ConfirmMerge { .. } => {
             let modal_area = centered_rect(54, 26, frame.area());
             frame.render_widget(Clear, modal_area);
             draw_merge_modal(frame, app, modal_area);
@@ -829,12 +829,18 @@ fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mr = app.selected_mr();
-    let title = mr.and_then(|m| m.title.as_deref()).unwrap_or("?");
-    let id = mr
-        .and_then(|m| m.iid)
+    let Mode::ConfirmMerge {
+        id_or_branch,
+        title,
+        ..
+    } = &app.mode
+    else {
+        return;
+    };
+    let id = id_or_branch
+        .parse::<u64>()
         .map(|iid| format!("!{iid}"))
-        .unwrap_or_else(|| "!?".to_string());
+        .unwrap_or_else(|_| id_or_branch.clone());
 
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -858,7 +864,7 @@ fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("  ", Style::default().fg(TEXT)),
             Span::styled(id, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
             Span::styled(" ", Style::default().fg(DIM)),
-            Span::styled(title.to_string(), Style::default().fg(TEXT)),
+            Span::styled(title.clone(), Style::default().fg(TEXT)),
         ])),
         chunks[2],
     );
@@ -879,8 +885,9 @@ fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::MrSnapshot;
+    use crate::app::{MrKey, MrSnapshot};
     use crate::gitlab::{MergeRequest, MrState};
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn mr_preview_missing_prompts_creation() {
@@ -959,11 +966,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn merge_modal_renders_captured_confirmation_details() {
+        let config = crate::config::Config::from_toml_str(r#"repos = []"#).unwrap();
+        let mut app = App::new(config);
+        app.mode = Mode::ConfirmMerge {
+            key: MrKey::new("/tmp/repo".into(), "fix-auth".into()),
+            id_or_branch: "1".into(),
+            title: "Captured MR".into(),
+        };
+
+        let backend = TestBackend::new(64, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_merge_modal(frame, &app, frame.area()))
+            .unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        assert!(text.contains("!1"));
+        assert!(text.contains("Captured MR"));
+    }
+
     fn hint_text(line: &Line<'static>) -> String {
         line.spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let area = buffer.area;
+        let mut text = String::new();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(cell) = buffer.cell((x, y)) {
+                    text.push_str(cell.symbol());
+                }
+            }
+            text.push('\n');
+        }
+        text
     }
 
     fn test_mr() -> MergeRequest {
