@@ -236,6 +236,7 @@ pub fn list_args(source_branch: &str) -> Vec<String> {
         "list",
         "--source-branch",
         source_branch,
+        "--all",
         "--output",
         "json",
     ])
@@ -461,6 +462,7 @@ mod tests {
                 "list",
                 "--source-branch",
                 "feature/a b",
+                "--all",
                 "--output",
                 "json"
             ],

@@ -248,7 +248,11 @@ pub enum Mode {
         agent_name: String,
     },
     ConfirmDelete,
-    ConfirmMerge,
+    ConfirmMerge {
+        key: MrKey,
+        id_or_branch: String,
+        title: String,
+    },
 }
 
 fn find_main_branch(branches: &[String]) -> usize {
@@ -424,6 +428,22 @@ impl App {
         self.mr_refresh_pending = true;
         self.mr_refresh_outstanding = cmds.len();
         cmds
+    }
+
+    fn schedule_selected_mr_refresh(&mut self) -> Vec<Command> {
+        if self.mr_refresh_pending {
+            return Vec::new();
+        }
+        let Some(agent) = self.selected_agent() else {
+            self.mr_refresh_pending = false;
+            self.mr_refresh_outstanding = 0;
+            return Vec::new();
+        };
+        let key = MrKey::new(agent.repo_path.clone(), agent.branch.clone());
+        let source_branch = agent.branch.clone();
+        self.mr_refresh_pending = true;
+        self.mr_refresh_outstanding = 1;
+        vec![Command::RefreshMr { key, source_branch }]
     }
 
     fn selected_agent_fresh_cmd(&self, prompt: &str) -> Option<String> {
@@ -1031,10 +1051,17 @@ impl App {
                     self.mr_refresh_pending = false;
                 }
             }
-            Action::MrCreate => {
-                if self.selected_mr().is_some() {
+            Action::MrCreate => match self.selected_mr_snapshot() {
+                Some(MrSnapshot::Ready(_)) => {
                     self.preview_mode = PreviewMode::MergeRequest;
-                } else if let Some(agent) = self.selected_agent() {
+                }
+                Some(MrSnapshot::Error(_)) => {
+                    cmds.extend(self.schedule_selected_mr_refresh());
+                }
+                None | Some(MrSnapshot::Missing) => {
+                    let Some(agent) = self.selected_agent() else {
+                        return cmds;
+                    };
                     let key = MrKey::new(agent.repo_path.clone(), agent.branch.clone());
                     cmds.push(Command::CreateMr {
                         key,
@@ -1042,7 +1069,7 @@ impl App {
                         target_branch: self.selected_base_branch(),
                     });
                 }
-            }
+            },
             Action::MrOpen => {
                 if let (Some(key), Some(id_or_branch)) =
                     (self.selected_mr_key(), self.selected_mr_id_or_branch())
@@ -1053,21 +1080,33 @@ impl App {
                 }
             }
             Action::MrMerge => {
-                let ready = self
+                let confirmation_title = self
                     .selected_mr()
-                    .map(|mr| classify(Some(mr)).kind == MrDisplayKind::Ready)
-                    .unwrap_or(false);
-                if ready {
-                    self.mode = Mode::ConfirmMerge;
+                    .filter(|mr| classify(Some(mr)).kind == MrDisplayKind::Ready)
+                    .map(|mr| mr.title.clone().unwrap_or_else(|| "(untitled)".into()));
+                if let (Some(title), Some(key), Some(id_or_branch)) = (
+                    confirmation_title,
+                    self.selected_mr_key(),
+                    self.selected_mr_id_or_branch(),
+                ) {
+                    self.mode = Mode::ConfirmMerge {
+                        key,
+                        id_or_branch,
+                        title,
+                    };
                 } else {
                     self.status_message = Some("not ready; use f make-ready".into());
                 }
             }
             Action::MrMergeConfirmed => {
-                if let (Some(key), Some(id_or_branch)) =
-                    (self.selected_mr_key(), self.selected_mr_id_or_branch())
+                if let Mode::ConfirmMerge {
+                    key, id_or_branch, ..
+                } = &self.mode
                 {
-                    cmds.push(Command::MergeMr { key, id_or_branch });
+                    cmds.push(Command::MergeMr {
+                        key: key.clone(),
+                        id_or_branch: id_or_branch.clone(),
+                    });
                 }
                 self.mode = Mode::Normal;
             }
@@ -1296,7 +1335,7 @@ impl App {
                 }),
                 _ => None,
             },
-            Mode::ConfirmMerge => match key.code {
+            Mode::ConfirmMerge { .. } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => Some(Action::CancelMode),
                 KeyCode::Char('y') => Some(Action::MrMergeConfirmed),
                 _ => None,
@@ -1380,6 +1419,14 @@ mod tests {
         let toml_str = format!("repos = [{}]", repos_toml.join(", "));
         let config = crate::config::Config::from_toml_str(&toml_str).unwrap();
         App::new(config)
+    }
+
+    fn confirm_merge_mode() -> Mode {
+        Mode::ConfirmMerge {
+            key: MrKey::new("/tmp/repo".into(), "fix-auth".into()),
+            id_or_branch: "1".into(),
+            title: "MR".into(),
+        }
     }
 
     #[test]
@@ -2016,7 +2063,7 @@ mod tests {
     #[test]
     fn confirmmerge_y_confirms_merge() {
         let mut app = test_app();
-        app.mode = Mode::ConfirmMerge;
+        app.mode = confirm_merge_mode();
         let action = app.handle_key(make_key(KeyCode::Char('y')));
         assert!(matches!(action, Some(Action::MrMergeConfirmed)));
     }
@@ -2024,7 +2071,7 @@ mod tests {
     #[test]
     fn confirmmerge_esc_cancels() {
         let mut app = test_app();
-        app.mode = Mode::ConfirmMerge;
+        app.mode = confirm_merge_mode();
         let action = app.handle_key(make_key(KeyCode::Esc));
         assert!(matches!(action, Some(Action::CancelMode)));
     }
@@ -2032,7 +2079,7 @@ mod tests {
     #[test]
     fn confirmmerge_q_cancels() {
         let mut app = test_app();
-        app.mode = Mode::ConfirmMerge;
+        app.mode = confirm_merge_mode();
         let action = app.handle_key(make_key(KeyCode::Char('q')));
         assert!(matches!(action, Some(Action::CancelMode)));
     }
@@ -2040,7 +2087,7 @@ mod tests {
     #[test]
     fn confirmmerge_ignores_other_keys() {
         let mut app = test_app();
-        app.mode = Mode::ConfirmMerge;
+        app.mode = confirm_merge_mode();
         let action = app.handle_key(make_key(KeyCode::Char('n')));
         assert!(action.is_none());
     }
@@ -3647,6 +3694,25 @@ mod tests {
     }
 
     #[test]
+    fn m_retries_mr_refresh_when_snapshot_is_error() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        let key = app.selected_mr_key().unwrap();
+        app.mr_snapshots
+            .insert(key.clone(), MrSnapshot::Error("glab failed".into()));
+
+        let cmds = app.update(Action::MrCreate);
+
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::RefreshMr {
+                key: command_key,
+                source_branch
+            }] if command_key == &key && source_branch == "fix-auth"
+        ));
+    }
+
+    #[test]
     fn merge_refuses_non_ready_mr() {
         let mut app = test_app();
         app.agents = vec![mock_agent("fix-auth")];
@@ -3673,7 +3739,45 @@ mod tests {
         app.mr_snapshots.insert(key, MrSnapshot::Ready(mr));
         let cmds = app.update(Action::MrMerge);
         assert!(cmds.is_empty());
-        assert!(matches!(app.mode, Mode::ConfirmMerge));
+        assert!(matches!(
+            app.mode,
+            Mode::ConfirmMerge {
+                id_or_branch,
+                title,
+                ..
+            } if id_or_branch == "1" && title == "MR"
+        ));
+    }
+
+    #[test]
+    fn merge_confirmation_uses_original_mr_after_selection_changes() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth"), mock_agent("docs")];
+        let first_key = MrKey::new("/tmp/repo".into(), "fix-auth".into());
+        let second_key = MrKey::new("/tmp/repo".into(), "docs".into());
+        let mut first_mr = test_mr("fix-auth");
+        first_mr.iid = Some(1);
+        first_mr.merge_state = Some("mergeable".into());
+        first_mr.pipeline_state = Some("success".into());
+        let mut second_mr = test_mr("docs");
+        second_mr.iid = Some(2);
+        second_mr.merge_state = Some("mergeable".into());
+        second_mr.pipeline_state = Some("success".into());
+        app.mr_snapshots
+            .insert(first_key.clone(), MrSnapshot::Ready(first_mr));
+        app.mr_snapshots
+            .insert(second_key, MrSnapshot::Ready(second_mr));
+
+        let cmds = app.update(Action::MrMerge);
+        assert!(cmds.is_empty());
+        app.selected = 1;
+        let cmds = app.update(Action::MrMergeConfirmed);
+
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::MergeMr { key, id_or_branch }]
+                if key == &first_key && id_or_branch == "1"
+        ));
     }
 
     #[test]
