@@ -1,3 +1,6 @@
+use crate::agent::{Agent, AgentStatus};
+use crate::app::{App, Mode, MrSnapshot, PreviewMode};
+use crate::gitlab::{MergeRequest, MrDisplayKind, MrState, classify};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Rect},
@@ -5,10 +8,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
 };
-use crate::app::{App, Mode};
-use crate::agent::{Agent, AgentStatus};
 
-use crate::style::{DIM, TEXT, drift_arrow, footer_hint, modal_title, status_color};
+use crate::style::{
+    BUSY, DIM, FAIL, OK, TEXT, drift_arrow, footer_hint, modal_title, status_color,
+};
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
 
@@ -34,13 +37,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
     });
 
     let chunks = Layout::vertical([
-        Constraint::Min(1),                       // preview pane
-        Constraint::Length(1),                    // breathing room above separator
-        Constraint::Length(1),                    // horizontal separator
-        Constraint::Length(1),                    // breathing room below separator
-        Constraint::Length(AGENT_TABLE_HEIGHT),   // agent table: header + gap + 4 rows
-        Constraint::Length(1),                    // breathing room above status bar
-        Constraint::Length(1),                    // status bar
+        Constraint::Min(1),                     // preview pane
+        Constraint::Length(1),                  // breathing room above separator
+        Constraint::Length(1),                  // horizontal separator
+        Constraint::Length(1),                  // breathing room below separator
+        Constraint::Length(AGENT_TABLE_HEIGHT), // agent table: header + gap + 4 rows
+        Constraint::Length(1),                  // breathing room above status bar
+        Constraint::Length(1),                  // status bar
     ])
     .split(inner);
 
@@ -65,13 +68,18 @@ pub fn draw(frame: &mut Frame, app: &App) {
             frame.render_widget(Clear, modal_area);
             draw_delete_modal(frame, app, modal_area);
         }
+        Mode::ConfirmMerge => {
+            let modal_area = centered_rect(54, 26, frame.area());
+            frame.render_widget(Clear, modal_area);
+            draw_merge_modal(frame, app, modal_area);
+        }
         _ => {}
     }
 }
 
 const SPINNER_FRAMES: [&str; 10] = [
-    "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}",
-    "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}",
+    "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}",
+    "\u{2807}", "\u{280F}",
 ];
 
 fn status_glyph(agent: &Agent, frame_idx: usize, _base: Style) -> Span<'static> {
@@ -89,6 +97,113 @@ fn status_glyph(agent: &Agent, frame_idx: usize, _base: Style) -> Span<'static> 
         }
         _ => Span::styled("\u{2713}", style),
     }
+}
+
+fn mr_glyph(app: &App, agent: &Agent) -> Span<'static> {
+    let display = classify(app.mr_for_agent(agent));
+    let color = match display.kind {
+        MrDisplayKind::None => DIM,
+        MrDisplayKind::Unknown => FAIL,
+        MrDisplayKind::Draft | MrDisplayKind::Open => BUSY,
+        MrDisplayKind::Ready | MrDisplayKind::Merged => OK,
+        MrDisplayKind::Blocked => FAIL,
+    };
+    Span::styled(display.glyph, Style::default().fg(color))
+}
+
+fn mr_preview_lines(snapshot: Option<&MrSnapshot>) -> Vec<Line<'static>> {
+    match snapshot {
+        None | Some(MrSnapshot::Missing) => vec![
+            Line::from(Span::styled("No merge request.", Style::default().fg(DIM))),
+            Line::from(Span::styled("m create", Style::default().fg(DIM))),
+        ],
+        Some(MrSnapshot::Refreshing) => vec![Line::from(Span::styled(
+            "Refreshing merge request...",
+            Style::default().fg(BUSY),
+        ))],
+        Some(MrSnapshot::Error(error)) => vec![
+            Line::from(Span::styled(
+                "Merge request error",
+                Style::default().fg(FAIL),
+            )),
+            Line::from(Span::styled(error.clone(), Style::default().fg(DIM))),
+        ],
+        Some(MrSnapshot::Ready(mr)) => render_mr(mr),
+    }
+}
+
+fn render_mr(mr: &MergeRequest) -> Vec<Line<'static>> {
+    let display = classify(Some(mr));
+    let display_style = match display.kind {
+        MrDisplayKind::None => Style::default().fg(DIM),
+        MrDisplayKind::Unknown | MrDisplayKind::Blocked => Style::default().fg(FAIL),
+        MrDisplayKind::Draft | MrDisplayKind::Open => Style::default().fg(BUSY),
+        MrDisplayKind::Ready | MrDisplayKind::Merged => Style::default().fg(OK),
+    };
+    let dim = Style::default().fg(DIM);
+    let text = Style::default().fg(TEXT);
+
+    let id = mr
+        .iid
+        .map(|iid| format!("!{iid}"))
+        .unwrap_or_else(|| "!?".to_string());
+    let title = mr.title.as_deref().unwrap_or("(untitled)");
+    let state = match &mr.state {
+        MrState::None => "none".to_string(),
+        MrState::Open => "open".to_string(),
+        MrState::Closed => "closed".to_string(),
+        MrState::Merged => "merged".to_string(),
+        MrState::Unknown(s) => s.clone(),
+    };
+    let draft = match mr.draft {
+        Some(true) => "draft",
+        Some(false) => "ready",
+        None => "draft?",
+    };
+    let target = mr.target_branch.as_deref().unwrap_or("?");
+    let merge = mr.merge_state.as_deref().unwrap_or("merge?");
+    let pipeline = mr.pipeline_state.as_deref().unwrap_or("pipeline?");
+    let unresolved = mr
+        .unresolved_count
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "?".to_string());
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(display.glyph, display_style),
+            Span::styled(" ", dim),
+            Span::styled(id, text.add_modifier(Modifier::BOLD)),
+            Span::styled(" ", dim),
+            Span::styled(title.to_string(), text),
+        ]),
+        Line::from(vec![
+            Span::styled("state ", dim),
+            Span::styled(state, text),
+            Span::styled("  draft ", dim),
+            Span::styled(draft, text),
+            Span::styled("  merge ", dim),
+            Span::styled(merge.to_string(), text),
+            Span::styled("  ci ", dim),
+            Span::styled(pipeline.to_string(), text),
+            Span::styled("  notes ", dim),
+            Span::styled(unresolved, text),
+        ]),
+        Line::from(vec![
+            Span::styled("branch ", dim),
+            Span::styled(mr.source_branch.clone(), text),
+            Span::styled(" -> ", dim),
+            Span::styled(target.to_string(), text),
+        ]),
+    ];
+
+    if let Some(url) = &mr.url {
+        lines.push(Line::from(vec![
+            Span::styled("url ", dim),
+            Span::styled(url.clone(), text),
+        ]));
+    }
+
+    lines
 }
 
 fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
@@ -114,18 +229,34 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
         0
     };
 
-    let repo_w = app.agents.iter().map(|a| a.repo_name.len()).max().unwrap_or(0).max(4) as u16;
+    let repo_w = app
+        .agents
+        .iter()
+        .map(|a| a.repo_name.len())
+        .max()
+        .unwrap_or(0)
+        .max(4) as u16;
     // Branch column may show "<slug> \u{2192} <branch>" when drifted; size for that.
-    let branch_w = app.agents.iter().map(|a| {
-        if a.slug != a.branch.replace('/', "-") {
-            a.slug.len() + 3 + a.branch.len()
-        } else {
-            a.branch.len()
-        }
-    }).max().unwrap_or(0).max(6) as u16;
-    let has_base = app.agents.iter().any(|a| a.base_branch.as_deref().is_some_and(|b| !b.is_empty()));
+    let branch_w = app
+        .agents
+        .iter()
+        .map(|a| {
+            if a.slug != a.branch.replace('/', "-") {
+                a.slug.len() + 3 + a.branch.len()
+            } else {
+                a.branch.len()
+            }
+        })
+        .max()
+        .unwrap_or(0)
+        .max(6) as u16;
+    let has_base = app
+        .agents
+        .iter()
+        .any(|a| a.base_branch.as_deref().is_some_and(|b| !b.is_empty()));
     let base_col_w = if has_base {
-        app.agents.iter()
+        app.agents
+            .iter()
             .map(|a| a.base_branch.as_deref().unwrap_or("").len())
             .max()
             .unwrap_or(0)
@@ -134,10 +265,17 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
         0
     };
     let status_w: u16 = 1;
+    let mr_w: u16 = 1;
 
     let mut rows: Vec<Row> = Vec::new();
 
-    for (i, agent) in app.agents.iter().enumerate().skip(offset).take(visible_rows) {
+    for (i, agent) in app
+        .agents
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible_rows)
+    {
         let is_selected = i == app.selected;
 
         let indicator = if is_selected { "\u{2502}" } else { " " };
@@ -163,7 +301,10 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(vec![
                 Span::styled(agent.slug.as_str(), text_style),
                 drift_arrow(),
-                Span::styled(agent.branch.as_str(), text_style.add_modifier(Modifier::ITALIC)),
+                Span::styled(
+                    agent.branch.as_str(),
+                    text_style.add_modifier(Modifier::ITALIC),
+                ),
             ])
         } else {
             Line::from(Span::styled(agent.branch.as_str(), text_style))
@@ -172,6 +313,7 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
         rows.push(Row::new(vec![
             Cell::from(Span::styled(indicator, indicator_style)),
             Cell::from(status_glyph(agent, app.spinner_frame, text_style)),
+            Cell::from(mr_glyph(app, agent)),
             Cell::from(branch_cell),
             Cell::from(base_cell),
             Cell::from(Span::styled(agent.repo_name.as_str(), text_style)),
@@ -182,16 +324,19 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(vec![
         Cell::from(""),
         Cell::from(""),
+        Cell::from(""),
         Cell::from(Span::styled("BRANCH", hdr_style)),
         Cell::from(Span::styled("BASE", hdr_style)),
         Cell::from(Span::styled("REPO", hdr_style)),
-    ]).bottom_margin(1);
+    ])
+    .bottom_margin(1);
 
     let table = Table::new(
         rows,
         [
             Constraint::Length(1),
             Constraint::Length(status_w + 1),
+            Constraint::Length(mr_w + 1),
             Constraint::Length(branch_w + 2),
             Constraint::Length(if base_col_w > 0 { base_col_w + 2 } else { 0 }),
             Constraint::Min(repo_w),
@@ -234,7 +379,11 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
         let dim_style = Style::default().fg(DIM);
         let mut spans = vec![Span::styled(" ", dim_style)];
         for (i, agent) in app.agents.iter().enumerate() {
-            let glyph = if i == app.selected { "\u{25CF}" } else { "\u{2022}" };
+            let glyph = if i == app.selected {
+                "\u{25CF}"
+            } else {
+                "\u{2022}"
+            };
             let style = Style::default().fg(status_color(agent));
             spans.push(Span::styled(glyph, style));
             if i + 1 < total {
@@ -253,8 +402,7 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
             let pos_len: usize = pos.iter().map(|s| s.width()).sum();
             let left_dashes = 3;
             let right_dashes = 3;
-            let middle_dashes = w
-                .saturating_sub(left_dashes + pos_len + label_len + right_dashes);
+            let middle_dashes = w.saturating_sub(left_dashes + pos_len + label_len + right_dashes);
             let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
             spans.extend(pos);
             spans.push(Span::styled("\u{2500}".repeat(middle_dashes), dash_style));
@@ -298,11 +446,16 @@ fn tail_lines(s: &str, n: usize) -> &str {
 }
 
 fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
+    if app.preview_mode == PreviewMode::MergeRequest {
+        let preview = Paragraph::new(mr_preview_lines(app.selected_mr_snapshot()))
+            .style(Style::default().fg(TEXT));
+        frame.render_widget(preview, area);
+        return;
+    }
+
     let content = app.preview_content.as_deref().unwrap_or("");
     let tail = tail_lines(content.trim_end(), area.height as usize);
-
-    let preview = Paragraph::new(tail)
-        .style(Style::default().fg(TEXT));
+    let preview = Paragraph::new(tail).style(Style::default().fg(TEXT));
 
     frame.render_widget(preview, area);
 }
@@ -321,6 +474,17 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             ("?", "hide"),
             ("q", "quit"),
         ])
+    } else if app.selected_agent().is_some() {
+        footer_hint(&[
+            ("tab", "preview"),
+            ("m", "mr"),
+            ("o", "open"),
+            ("r", "rebase"),
+            ("f", "ready"),
+            ("v", "review"),
+            ("M", "merge"),
+            ("?", "help"),
+        ])
     } else {
         Line::from(Span::styled("?", Style::default().fg(DIM)))
     };
@@ -328,7 +492,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
-    use crate::app::{NewAgentFocus, BranchMode};
+    use crate::app::{BranchMode, NewAgentFocus};
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -338,10 +502,20 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let Mode::NewAgent {
-        repo_index, branch_mode, prompt, focus,
-        base_index, branches, existing_branches,
-        branch_name, name_pristine, agent_name,
-    } = &app.mode else { return };
+        repo_index,
+        branch_mode,
+        prompt,
+        focus,
+        base_index,
+        branches,
+        existing_branches,
+        branch_name,
+        name_pristine,
+        agent_name,
+    } = &app.mode
+    else {
+        return;
+    };
 
     let repos = app.config.resolved_repos();
     let repo_name = repos
@@ -360,27 +534,35 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     let name_rows = if show_name { 2 } else { 0 }; // row + gap
 
     let chunks = Layout::vertical([
-        Constraint::Length(1),              // top padding
-        Constraint::Length(1),              // Agent row
-        Constraint::Length(1),              // gap
-        Constraint::Length(1),              // Repo row
-        Constraint::Length(1),              // gap
-        Constraint::Length(1),              // Branch toggle row
-        Constraint::Length(list_height),    // Branch list
-        Constraint::Length(1),              // gap
-        Constraint::Length(name_rows),      // Name row (0 if Existing)
-        Constraint::Length(1),              // Prompt label
-        Constraint::Min(3),                // Prompt area
-        Constraint::Length(1),              // hint bar
+        Constraint::Length(1),           // top padding
+        Constraint::Length(1),           // Agent row
+        Constraint::Length(1),           // gap
+        Constraint::Length(1),           // Repo row
+        Constraint::Length(1),           // gap
+        Constraint::Length(1),           // Branch toggle row
+        Constraint::Length(list_height), // Branch list
+        Constraint::Length(1),           // gap
+        Constraint::Length(name_rows),   // Name row (0 if Existing)
+        Constraint::Length(1),           // Prompt label
+        Constraint::Min(3),              // Prompt area
+        Constraint::Length(1),           // hint bar
     ])
     .split(inner);
 
     let label_w = 14u16;
     let label_style = |focused: bool| {
-        if focused { Style::default().fg(TEXT) } else { Style::default().fg(DIM) }
+        if focused {
+            Style::default().fg(TEXT)
+        } else {
+            Style::default().fg(DIM)
+        }
     };
     let val_style = |focused: bool| {
-        if focused { Style::default().fg(TEXT) } else { Style::default().fg(DIM) }
+        if focused {
+            Style::default().fg(TEXT)
+        } else {
+            Style::default().fg(DIM)
+        }
     };
 
     // Picker row: "│ Label    value" when focused, "  Label    value" when not.
@@ -450,7 +632,8 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             0
         };
-        let lines: Vec<Line> = active_list.iter()
+        let lines: Vec<Line> = active_list
+            .iter()
             .enumerate()
             .skip(scroll)
             .take(visible)
@@ -518,8 +701,15 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         let cursor = if is_prompt { "_" } else { "" };
         let text = format!("{}{}{}", " ".repeat(label_w as usize), prompt, cursor);
         let width = prompt_area.width.max(1) as usize;
-        let line_count: u16 = text.split('\n')
-            .map(|l| if l.is_empty() { 1 } else { ((l.len() as u16).saturating_add(width as u16 - 1)) / width as u16 })
+        let line_count: u16 = text
+            .split('\n')
+            .map(|l| {
+                if l.is_empty() {
+                    1
+                } else {
+                    ((l.len() as u16).saturating_add(width as u16 - 1)) / width as u16
+                }
+            })
             .sum();
         let scroll = line_count.saturating_sub(prompt_area.height);
         let paragraph = Paragraph::new(text)
@@ -534,18 +724,21 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         NewAgentFocus::Agent | NewAgentFocus::Repo | NewAgentFocus::BranchToggle => {
             footer_hint(&[("←/→", "cycle"), ("tab", "next"), ("q/esc", "cancel")])
         }
-        NewAgentFocus::BranchList => {
-            footer_hint(&[("↑/k", "up"), ("↓/j", "down"), ("tab", "next"), ("q/esc", "cancel")])
-        }
+        NewAgentFocus::BranchList => footer_hint(&[
+            ("↑/k", "up"),
+            ("↓/j", "down"),
+            ("tab", "next"),
+            ("q/esc", "cancel"),
+        ]),
         NewAgentFocus::Name => {
-            footer_hint(&[("tab", "next"), ("esc", "cancel")])  // q types literally here
+            footer_hint(&[("tab", "next"), ("esc", "cancel")]) // q types literally here
         }
         NewAgentFocus::Prompt => {
             footer_hint(&[
                 ("enter", "start"),
                 ("alt+enter", "newline"),
                 ("tab", "options"),
-                ("esc", "cancel"),  // q types literally here
+                ("esc", "cancel"), // q types literally here
             ])
         }
     };
@@ -564,18 +757,16 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let agent = app.selected_agent();
-    let name = agent
-        .map(|a| a.branch.as_str())
-        .unwrap_or("?");
+    let name = agent.map(|a| a.branch.as_str()).unwrap_or("?");
     let has_session = agent.is_some_and(|a| a.status.has_session());
 
     let chunks = Layout::vertical([
-        Constraint::Length(1),  // top padding
-        Constraint::Length(1),  // line 1
-        Constraint::Length(1),  // line 2
-        Constraint::Length(1),  // line 3
+        Constraint::Length(1), // top padding
+        Constraint::Length(1), // line 1
+        Constraint::Length(1), // line 2
+        Constraint::Length(1), // line 3
         Constraint::Min(0),    // spacer
-        Constraint::Length(1),  // hint bar
+        Constraint::Length(1), // hint bar
     ])
     .split(inner);
 
@@ -615,4 +806,105 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::raw("  ")];
     spans.extend(hint.spans);
     frame.render_widget(Paragraph::new(Line::from(spans)), chunks[5]);
+}
+
+fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(DIM))
+        .title(modal_title("Merge MR"));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mr = app.selected_mr();
+    let title = mr.and_then(|m| m.title.as_deref()).unwrap_or("?");
+    let id = mr
+        .and_then(|m| m.iid)
+        .map(|iid| format!("!{iid}"))
+        .unwrap_or_else(|| "!?".to_string());
+
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  Merge this merge request?",
+            Style::default().fg(TEXT),
+        ))),
+        chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  ", Style::default().fg(TEXT)),
+            Span::styled(id, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled(" ", Style::default().fg(DIM)),
+            Span::styled(title.to_string(), Style::default().fg(TEXT)),
+        ])),
+        chunks[2],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  glab will merge it upstream.",
+            Style::default().fg(DIM),
+        ))),
+        chunks[3],
+    );
+
+    let hint = footer_hint(&[("y", "merge"), ("q/esc", "cancel")]);
+    let mut spans = vec![Span::raw("  ")];
+    spans.extend(hint.spans);
+    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[5]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::MrSnapshot;
+    use crate::gitlab::{MergeRequest, MrState};
+
+    #[test]
+    fn mr_preview_missing_prompts_creation() {
+        let lines = mr_preview_lines(Some(&MrSnapshot::Missing));
+
+        assert_eq!(lines[0].spans[0].content, "No merge request.");
+    }
+
+    #[test]
+    fn mr_preview_ready_renders_compact_details() {
+        let mr = test_mr();
+        let lines = mr_preview_lines(Some(&MrSnapshot::Ready(mr)));
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| { line.spans.iter().any(|span| span.content.contains("!42")) })
+        );
+        assert!(lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("feature/auth"))
+        }));
+    }
+
+    fn test_mr() -> MergeRequest {
+        MergeRequest {
+            source_branch: "feature/auth".into(),
+            target_branch: Some("main".into()),
+            iid: Some(42),
+            title: Some("Fix auth".into()),
+            url: Some("https://gitlab.example.com/g/r/-/merge_requests/42".into()),
+            state: MrState::Open,
+            draft: Some(false),
+            merge_state: Some("mergeable".into()),
+            pipeline_state: Some("success".into()),
+            unresolved_count: Some(0),
+        }
+    }
 }
