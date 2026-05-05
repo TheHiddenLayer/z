@@ -90,6 +90,7 @@ pub fn classify(mr: Option<&MergeRequest>) -> MrDisplay {
         .to_ascii_lowercase();
     let blocked = [
         "cannot_be_merged",
+        "blocked",
         "conflict",
         "checking",
         "unchecked",
@@ -332,6 +333,15 @@ mod tests {
     fn classify_blocked_is_b() {
         let mut mr = mr("feature/x");
         mr.merge_state = Some("cannot_be_merged".into());
+        let d = classify(Some(&mr));
+        assert_eq!(d.glyph, "B");
+        assert_eq!(d.kind, MrDisplayKind::Blocked);
+    }
+
+    #[test]
+    fn classify_blocked_merge_state_is_b() {
+        let mut mr = mr("feature/x");
+        mr.merge_state = Some("blocked".into());
         let d = classify(Some(&mr));
         assert_eq!(d.glyph, "B");
         assert_eq!(d.kind, MrDisplayKind::Blocked);
