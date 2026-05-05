@@ -550,11 +550,12 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
             key,
             source_branch,
             target_branch,
+            worktree_path,
         } => {
             let tx = tx.clone();
             tokio::spawn(async move {
                 let snapshot = match run_glab(
-                    &key.repo_path,
+                    &worktree_path,
                     crate::gitlab::create_args(&source_branch, &target_branch),
                 )
                 .await
@@ -582,9 +583,9 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                 if let Err(e) =
                     run_glab(&key.repo_path, crate::gitlab::open_args(&id_or_branch)).await
                 {
-                    let _ = tx.send(Action::MrRefreshed {
+                    let _ = tx.send(Action::MrOpenFailed {
                         key,
-                        snapshot: crate::app::MrSnapshot::Error(format!("MR open: {e}")),
+                        error: format!("MR open: {e}"),
                     });
                 }
             });

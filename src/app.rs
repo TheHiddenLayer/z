@@ -105,6 +105,10 @@ pub enum Action {
         key: MrKey,
         snapshot: MrSnapshot,
     },
+    MrOpenFailed {
+        key: MrKey,
+        error: String,
+    },
     MrCreate,
     MrOpen,
     MrMerge,
@@ -215,6 +219,7 @@ pub enum Command {
         key: MrKey,
         source_branch: String,
         target_branch: String,
+        worktree_path: PathBuf,
     },
     OpenMr {
         key: MrKey,
@@ -378,19 +383,21 @@ impl App {
         self.mr_snapshots.get(&key)
     }
 
-    pub fn mr_for_agent(&self, agent: &Agent) -> Option<&MergeRequest> {
+    pub fn mr_snapshot_for_agent(&self, agent: &Agent) -> Option<&MrSnapshot> {
         let key = MrKey::new(agent.repo_path.clone(), agent.branch.clone());
-        match self.mr_snapshots.get(&key) {
+        self.mr_snapshots.get(&key)
+    }
+
+    pub fn mr_for_agent(&self, agent: &Agent) -> Option<&MergeRequest> {
+        match self.mr_snapshot_for_agent(agent) {
             Some(MrSnapshot::Ready(mr)) => Some(mr),
             _ => None,
         }
     }
 
     pub fn selected_mr(&self) -> Option<&MergeRequest> {
-        match self.selected_mr_snapshot() {
-            Some(MrSnapshot::Ready(mr)) => Some(mr),
-            _ => None,
-        }
+        let agent = self.selected_agent()?;
+        self.mr_for_agent(agent)
     }
 
     pub fn selected_mr_id_or_branch(&self) -> Option<String> {
@@ -457,9 +464,9 @@ impl App {
     }
 
     fn selected_base_branch(&self) -> String {
-        self.selected_agent()
-            .and_then(|a| a.base_branch.clone())
-            .or_else(|| self.selected_mr().and_then(|mr| mr.target_branch.clone()))
+        self.selected_mr()
+            .and_then(|mr| mr.target_branch.clone())
+            .or_else(|| self.selected_agent().and_then(|a| a.base_branch.clone()))
             .unwrap_or_else(|| "main".to_string())
     }
 
@@ -1051,6 +1058,10 @@ impl App {
                     self.mr_refresh_pending = false;
                 }
             }
+            Action::MrOpenFailed { key, error } => {
+                let _ = key;
+                self.status_message = Some(error);
+            }
             Action::MrCreate => match self.selected_mr_snapshot() {
                 Some(MrSnapshot::Ready(_)) => {
                     self.preview_mode = PreviewMode::MergeRequest;
@@ -1067,6 +1078,7 @@ impl App {
                         key,
                         source_branch: agent.branch.clone(),
                         target_branch: self.selected_base_branch(),
+                        worktree_path: agent.worktree_path.clone(),
                     });
                 }
             },
@@ -3682,6 +3694,28 @@ mod tests {
     }
 
     #[test]
+    fn m_create_command_carries_selected_worktree_path() {
+        let mut app = test_app();
+        let mut agent = mock_agent("fix-auth");
+        agent.worktree_path = "/tmp/repo-worktrees/fix-auth".into();
+        app.agents = vec![agent];
+
+        let cmds = app.update(Action::MrCreate);
+
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::CreateMr {
+                source_branch,
+                target_branch,
+                worktree_path,
+                ..
+            }] if source_branch == "fix-auth"
+                && target_branch == "main"
+                && worktree_path == &std::path::PathBuf::from("/tmp/repo-worktrees/fix-auth")
+        ));
+    }
+
+    #[test]
     fn m_switches_to_mr_preview_when_mr_exists() {
         let mut app = test_app();
         app.agents = vec![mock_agent("fix-auth")];
@@ -3826,6 +3860,27 @@ mod tests {
     }
 
     #[test]
+    fn agentic_rebase_prefers_mr_target_branch_over_stored_base() {
+        let mut app = test_app();
+        let mut agent = mock_agent("fix-auth");
+        agent.status = AgentStatus::Stopped;
+        agent.base_branch = Some("main".into());
+        app.agents = vec![agent];
+        let key = app.selected_mr_key().unwrap();
+        let mut mr = test_mr("fix-auth");
+        mr.target_branch = Some("develop".into());
+        app.mr_snapshots.insert(key, MrSnapshot::Ready(mr));
+
+        let cmds = app.update(Action::MrIntent(MrIntent::Rebase));
+
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::StartAgentIntent { fresh_cmd, .. }]
+                if fresh_cmd.contains("onto develop")
+        ));
+    }
+
+    #[test]
     fn refresh_mrs_with_no_agents_does_not_get_stuck() {
         let mut app = test_app();
         let cmds = app.schedule_mr_refresh();
@@ -3905,6 +3960,28 @@ mod tests {
             [Command::OpenMr { key: command_key, id_or_branch }]
                 if command_key == &key && id_or_branch == "1"
         ));
+    }
+
+    #[test]
+    fn open_mr_failure_preserves_existing_snapshot() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        let key = app.selected_mr_key().unwrap();
+        let mr = test_mr("fix-auth");
+        app.mr_snapshots
+            .insert(key.clone(), MrSnapshot::Ready(mr.clone()));
+
+        let cmds = app.update(Action::MrOpenFailed {
+            key: key.clone(),
+            error: "MR open: browser unavailable".into(),
+        });
+
+        assert!(cmds.is_empty());
+        assert_eq!(app.mr_snapshots.get(&key), Some(&MrSnapshot::Ready(mr)));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("MR open: browser unavailable")
+        );
     }
 
     fn test_mr(branch: &str) -> MergeRequest {

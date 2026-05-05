@@ -112,8 +112,12 @@ fn mr_status_label(kind: MrDisplayKind) -> &'static str {
 }
 
 fn mr_status(app: &App, agent: &Agent, style: Style) -> Span<'static> {
-    let display = classify(app.mr_for_agent(agent));
-    Span::styled(mr_status_label(display.kind), style)
+    let kind = match app.mr_snapshot_for_agent(agent) {
+        Some(MrSnapshot::Ready(mr)) => classify(Some(mr)).kind,
+        Some(MrSnapshot::Error(_)) => MrDisplayKind::Unknown,
+        None | Some(MrSnapshot::Missing) => MrDisplayKind::None,
+    };
+    Span::styled(mr_status_label(kind), style)
 }
 
 fn mr_preview_lines(snapshot: Option<&MrSnapshot>) -> Vec<Line<'static>> {
@@ -1011,6 +1015,21 @@ mod tests {
         let span = mr_status(&app, &agent, Style::default().fg(TEXT));
 
         assert_eq!(span.content, "ready");
+        assert_eq!(span.style, Style::default().fg(TEXT));
+    }
+
+    #[test]
+    fn mr_column_shows_unknown_for_error_snapshot() {
+        let config = crate::config::Config::from_toml_str(r#"repos = []"#).unwrap();
+        let mut app = App::new(config);
+        let agent = test_agent("feature/auth");
+        let key = MrKey::new(agent.repo_path.clone(), agent.branch.clone());
+        app.mr_snapshots
+            .insert(key, MrSnapshot::Error("glab failed".into()));
+
+        let span = mr_status(&app, &agent, Style::default().fg(TEXT));
+
+        assert_eq!(span.content, "unknown");
         assert_eq!(span.style, Style::default().fg(TEXT));
     }
 
