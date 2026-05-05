@@ -171,10 +171,11 @@ async fn destroy_all(
         std::io::stdout().flush()?;
 
         let mut errors: Vec<String> = Vec::new();
-        if a.status.has_session() && !preserve_tmux {
-            if let Err(e) = agent::kill_session(&a.session_name).await {
-                errors.push(format!("kill_session: {e}"));
-            }
+        if a.status.has_session()
+            && !preserve_tmux
+            && let Err(e) = agent::kill_session(&a.session_name).await
+        {
+            errors.push(format!("kill_session: {e}"));
         }
         if let Err(e) = agent::remove_worktree(&a.repo_path, &a.worktree_path).await {
             errors.push(format!("remove_worktree: {e}"));
@@ -331,12 +332,26 @@ fn stderr_tail(bytes: &[u8]) -> String {
         .rev()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .unwrap_or_else(|| stderr.trim())
+        .unwrap_or("command failed")
         .to_string()
 }
 
 fn glab_error_message(stderr: &[u8]) -> String {
     let raw = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    let host_classification_failure = [
+        "no known gitlab host",
+        "known gitlab host",
+        "none of the git remotes",
+        "configured remotes",
+        "no gitlab remotes",
+    ]
+    .iter()
+    .any(|needle| raw.contains(needle));
+
+    if host_classification_failure {
+        return stderr_tail(stderr);
+    }
+
     if raw.contains("auth login")
         || raw.contains("not logged in")
         || raw.contains("not authenticated")
@@ -359,7 +374,7 @@ async fn run_glab(repo_path: &std::path::Path, args: Vec<String>) -> Result<Stri
             if e.kind() == std::io::ErrorKind::NotFound {
                 "glab not found".into()
             } else {
-                e.to_string()
+                format!("glab failed: {e}")
             }
         })?;
 
@@ -495,20 +510,19 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
         Command::PrepareAttach { agent, resume_cmd } => {
             let tx = tx.clone();
             tokio::spawn(async move {
-                if !agent.status.has_session() {
-                    if let Err(e) = agent::create_session(
+                if !agent.status.has_session()
+                    && let Err(e) = agent::create_session(
                         &agent.session_name,
                         &agent.worktree_path,
                         Some(&resume_cmd),
                     )
                     .await
-                    {
-                        let _ = tx.send(Action::AgentFailed {
-                            session: agent.session_name.clone(),
-                            error: e,
-                        });
-                        return;
-                    }
+                {
+                    let _ = tx.send(Action::AgentFailed {
+                        session: agent.session_name.clone(),
+                        error: e,
+                    });
+                    return;
                 }
                 let _ = tx.send(Action::AttachReady(agent));
             });
@@ -563,8 +577,16 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
             });
         }
         Command::OpenMr { key, id_or_branch } => {
+            let tx = tx.clone();
             tokio::spawn(async move {
-                let _ = run_glab(&key.repo_path, crate::gitlab::open_args(&id_or_branch)).await;
+                if let Err(e) =
+                    run_glab(&key.repo_path, crate::gitlab::open_args(&id_or_branch)).await
+                {
+                    let _ = tx.send(Action::MrRefreshed {
+                        key,
+                        snapshot: crate::app::MrSnapshot::Error(format!("MR open: {e}")),
+                    });
+                }
             });
         }
         Command::MergeMr { key, id_or_branch } => {
@@ -763,8 +785,8 @@ mod tests {
     }
 
     #[test]
-    fn stderr_tail_falls_back_to_trimmed_stderr() {
-        assert_eq!(stderr_tail(b"   "), "");
+    fn stderr_tail_falls_back_to_command_failed_for_empty_stderr() {
+        assert_eq!(stderr_tail(b"   "), "command failed");
         assert_eq!(stderr_tail(b"single line"), "single line");
     }
 
@@ -772,6 +794,12 @@ mod tests {
     fn glab_error_maps_auth_failures_to_terse_message() {
         let stderr = b"something failed\nPlease login to GitLab by running glab auth login\n";
         assert_eq!(glab_error_message(stderr), "glab auth required");
+    }
+
+    #[test]
+    fn glab_error_preserves_host_classification_failures() {
+        let stderr = b"none of the git remotes are configured remotes for a known GitLab host\nrun glab auth login\n";
+        assert_eq!(glab_error_message(stderr), "run glab auth login");
     }
 
     #[test]
