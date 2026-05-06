@@ -598,14 +598,40 @@ pub async fn create_session(
 }
 
 async fn send_shell_command(session: &str, shell_command: &str) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt as _;
+
+    // send-keys -l corrupts long multi-line input: bash readline redraws each
+    // PS2 line per char and the pty buffer races. Stage via a tmux paste
+    // buffer instead so readline absorbs the chunk atomically.
+    let buffer = format!("z-{session}");
+
+    let mut child = Command::new("tmux")
+        .args(["load-buffer", "-b", &buffer, "-"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("tmux failed: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(shell_command.as_bytes())
+            .await
+            .map_err(|e| format!("tmux load-buffer write failed: {e}"))?;
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("tmux failed: {e}"))?;
+    if !status.success() {
+        return Err("tmux load-buffer failed".to_string());
+    }
+
     let output = Command::new("tmux")
-        .args(["send-keys", "-t", session, "-l", shell_command])
+        .args(["paste-buffer", "-d", "-b", &buffer, "-t", session, "-p"])
         .output()
         .await
         .map_err(|e| format!("tmux failed: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "tmux send-keys failed: {}",
+            "tmux paste-buffer failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
