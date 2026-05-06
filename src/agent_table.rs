@@ -10,7 +10,10 @@ use ratatui::{
     layout::{Constraint, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Widget},
+    widgets::{
+        Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        StatefulWidget, Table, TableState, Widget,
+    },
 };
 
 use crate::agent::{Agent, AgentStatus};
@@ -21,6 +24,14 @@ const SPINNER_FRAMES: [&str; 10] = [
     "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}",
     "\u{2807}", "\u{280F}",
 ];
+
+fn table_scroll_offset(selected: usize, visible_rows: usize) -> usize {
+    if visible_rows == 0 {
+        0
+    } else {
+        selected.saturating_add(1).saturating_sub(visible_rows)
+    }
+}
 
 /// Builder-lite widget. Construct via [`new`], chain optional setters, then
 /// `frame.render_widget(&widget, area)`.
@@ -69,21 +80,22 @@ impl<'a> AgentTableWidget<'a> {
 impl Widget for &AgentTableWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if self.agents.is_empty() {
-            let line = Line::from(Span::styled(
-                self.empty_message,
-                Style::default().fg(DIM),
-            ));
+            let line = Line::from(Span::styled(self.empty_message, Style::default().fg(DIM)));
             Paragraph::new(line).render(area, buf);
             return;
         }
 
         let visible_rows = (area.height as usize).saturating_sub(2);
-        let offset = if visible_rows == 0 {
-            0
-        } else if self.selected >= visible_rows {
-            self.selected - visible_rows + 1
+        let selected = self.selected.min(self.agents.len().saturating_sub(1));
+        let offset = table_scroll_offset(selected, visible_rows);
+        let needs_scrollbar = self.agents.len() > visible_rows;
+        let table_area = if needs_scrollbar && area.width > 1 {
+            Rect {
+                width: area.width.saturating_sub(1),
+                ..area
+            }
         } else {
-            0
+            area
         };
 
         let repo_w = self
@@ -126,14 +138,8 @@ impl Widget for &AgentTableWidget<'_> {
         let mr_w: u16 = 7;
 
         let mut rows: Vec<Row> = Vec::new();
-        for (i, agent) in self
-            .agents
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .take(visible_rows)
-        {
-            let is_selected = i == self.selected;
+        for (i, agent) in self.agents.iter().enumerate() {
+            let is_selected = i == selected;
             let indicator = if is_selected { "\u{2502}" } else { " " };
             let indicator_style = if is_selected {
                 Style::default().fg(TEXT)
@@ -202,7 +208,22 @@ impl Widget for &AgentTableWidget<'_> {
         .header(header)
         .block(Block::default().borders(Borders::NONE));
 
-        Widget::render(table, area, buf);
+        let mut table_state = TableState::default()
+            .with_selected(Some(selected))
+            .with_offset(offset);
+        StatefulWidget::render(table, table_area, buf, &mut table_state);
+
+        if needs_scrollbar && area.width > 1 {
+            let mut scrollbar_state = ScrollbarState::new(self.agents.len())
+                .viewport_content_length(visible_rows)
+                .position(table_state.offset());
+            StatefulWidget::render(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight).style(Style::default().fg(DIM)),
+                area,
+                buf,
+                &mut scrollbar_state,
+            );
+        }
     }
 }
 
@@ -233,12 +254,16 @@ fn mr_status_label(kind: MrDisplayKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use crate::agent::tests::make_agent_with_status;
 
-    fn render_widget(widget: &AgentTableWidget<'_>, width: u16, height: u16) -> Terminal<TestBackend> {
+    fn render_widget(
+        widget: &AgentTableWidget<'_>,
+        width: u16,
+        height: u16,
+    ) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -298,5 +323,39 @@ mod tests {
         let terminal = render_widget(&widget, 60, 6);
         let dump = buffer_to_string(&terminal);
         assert!(dump.contains("ready"), "MR label missing in:\n{dump}");
+    }
+
+    #[test]
+    fn table_scroll_offset_keeps_selected_last_visible() {
+        assert_eq!(table_scroll_offset(0, 4), 0);
+        assert_eq!(table_scroll_offset(3, 4), 0);
+        assert_eq!(table_scroll_offset(4, 4), 1);
+        assert_eq!(table_scroll_offset(7, 4), 4);
+        assert_eq!(table_scroll_offset(7, 0), 0);
+    }
+
+    #[test]
+    fn selected_agent_near_end_is_visible() {
+        let mut agents = Vec::new();
+        for n in 1..=8 {
+            let mut agent = make_agent_with_status(AgentStatus::Running);
+            agent.repo_name = "myrepo".into();
+            agent.branch = format!("branch-{n}");
+            agent.slug = format!("branch-{n}");
+            agents.push(agent);
+        }
+
+        let widget = AgentTableWidget::new(&agents).selected(7);
+        let terminal = render_widget(&widget, 60, 6);
+        let dump = buffer_to_string(&terminal);
+
+        assert!(
+            dump.contains("branch-8"),
+            "selected branch missing in:\n{dump}"
+        );
+        assert!(
+            !dump.contains("branch-1"),
+            "first branch should scroll out:\n{dump}"
+        );
     }
 }
