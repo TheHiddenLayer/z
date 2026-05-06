@@ -487,7 +487,7 @@ mod tests {
     use super::*;
     use crate::agent::{Agent, AgentStatus};
     use crate::app::Action;
-    use crate::app::{BranchMode, Mode, NewAgentFocus, NewAgentSource, RemoteList};
+    use crate::app::{BranchMode, Mode, NewAgentFocus, NewAgentSource, PromptMode, RemoteList};
     use crate::config::Config;
     use crate::gitlab::GitlabIssue;
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
@@ -538,6 +538,62 @@ mod tests {
         buffer_text(terminal.backend().buffer())
     }
 
+    fn render_app_buffer(app: &App) -> Buffer {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+
+        terminal.backend().buffer().clone()
+    }
+
+    fn find_text_pos(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
+        let needle_width = needle.chars().count() as u16;
+        for y in 0..buffer.area().height {
+            for x in 0..buffer.area().width.saturating_sub(needle_width) {
+                let candidate: String = (0..needle_width)
+                    .map(|offset| buffer[(x + offset, y)].symbol())
+                    .collect();
+                if candidate == needle {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
+    }
+
+    fn branch_source_app() -> App {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+        if let Mode::NewAgent {
+            source,
+            focus,
+            branch_mode,
+            branches,
+            branch_name,
+            prompt_mode,
+            prompt,
+            ..
+        } = &mut app.mode
+        {
+            *source = NewAgentSource::Branch;
+            *focus = NewAgentFocus::Source;
+            *branch_mode = BranchMode::New;
+            *branches = vec![
+                "main".into(),
+                "team/render-task-list".into(),
+                "feat/configure-retry-env".into(),
+                "team/system-version".into(),
+                "search_strategy".into(),
+                "fix/local-disk-pressure-cascade".into(),
+            ];
+            *branch_name = "z-0506-138-feature-task-wizard-layout-polish".into();
+            *prompt_mode = PromptMode::Custom;
+            prompt.clear();
+        }
+        app
+    }
+
     fn issue(iid: u64, title: &str) -> GitlabIssue {
         GitlabIssue {
             iid,
@@ -555,7 +611,7 @@ mod tests {
 
         let text = render_app(&app);
 
-        assert!(text.contains("Start from"));
+        assert!(text.contains("Source"));
         assert!(
             text.contains("BRANCH"),
             "agent table header should remain visible while the wizard is open:\n{text}"
@@ -564,6 +620,174 @@ mod tests {
             !text.contains("New Agent"),
             "wizard should not draw a centered modal title:\n{text}"
         );
+    }
+
+    #[test]
+    fn new_agent_wizard_renders_source_tabs() {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+
+        let text = render_app(&app);
+
+        assert!(
+            text.contains("Source      issue  mr  branch"),
+            "source choice should expose all start modes as tabs:\n{text}"
+        );
+    }
+
+    #[test]
+    fn new_agent_wizard_orders_primary_controls() {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+
+        let text = render_app(&app);
+
+        let repo = text.find("Repo        myapp").expect(&text);
+        let source = text.find("Source      issue  mr  branch").expect(&text);
+        let search = text.find("Search      filter issues...").expect(&text);
+        let prompt = text.find("Prompt      default  custom").expect(&text);
+        let agent = text.find("Agent       claude  codex").expect(&text);
+        assert!(
+            repo < source && source < search && search < prompt && prompt < agent,
+            "wizard controls should be ordered Repo, Source, Search/options, Prompt, Agent:\n{text}"
+        );
+    }
+
+    #[test]
+    fn new_agent_wizard_renders_prompt_and_agent_tabs() {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+
+        let text = render_app(&app);
+
+        assert!(
+            text.contains("Prompt      default  custom"),
+            "prompt mode should render as tabs:\n{text}"
+        );
+        assert!(
+            text.contains("Agent       claude  codex"),
+            "agent choice should render as tabs:\n{text}"
+        );
+    }
+
+    #[test]
+    fn generated_prompt_is_collapsed_until_prompt_focus() {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+        app.update(Action::GitlabIssuesLoaded {
+            repo: "/tmp/myapp".into(),
+            result: Ok(vec![GitlabIssue {
+                iid: 42,
+                title: "Fix task setup".to_string(),
+                description: Some("Use setup context.".to_string()),
+                web_url: None,
+            }]),
+        });
+
+        let text = render_app(&app);
+
+        assert!(
+            text.contains("Prompt      default  custom"),
+            "wizard should show prompt mode tabs:\n{text}"
+        );
+        assert!(
+            text.contains("generated from issue"),
+            "wizard should explain where the prompt came from:\n{text}"
+        );
+        assert!(
+            !text.contains("Work on GitLab issue #42"),
+            "generated prompt body should stay hidden until prompt focus:\n{text}"
+        );
+    }
+
+    #[test]
+    fn branch_wizard_keeps_agent_near_prompt_when_prompt_unfocused() {
+        let app = branch_source_app();
+        let text = render_app(&app);
+        let lines: Vec<&str> = text.lines().collect();
+        let prompt_row = lines
+            .iter()
+            .position(|line| line.contains("Prompt"))
+            .expect(&text);
+        let agent_row = lines
+            .iter()
+            .position(|line| line.contains("Agent"))
+            .expect(&text);
+
+        assert!(
+            agent_row.saturating_sub(prompt_row) <= 3,
+            "agent should stay visually attached to prompt controls:\n{text}"
+        );
+    }
+
+    #[test]
+    fn custom_prompt_summary_shows_prompt_content() {
+        let mut app = branch_source_app();
+        if let Mode::NewAgent { prompt, .. } = &mut app.mode {
+            *prompt = "Refine wizard layout behavior".into();
+        }
+
+        let text = render_app(&app);
+
+        assert!(
+            text.contains("Refine wizard layout behavior"),
+            "collapsed custom prompt should preview the prompt content:\n{text}"
+        );
+        assert!(
+            !text.contains("custom prompt"),
+            "collapsed custom prompt should not repeat the selected tab name:\n{text}"
+        );
+    }
+
+    #[test]
+    fn long_branch_name_is_truncated_in_name_row() {
+        let app = branch_source_app();
+        let full_name = "z-0506-138-feature-task-wizard-layout-polish";
+        let text = render_app(&app);
+
+        assert!(
+            !text.contains(full_name),
+            "full branch name should not overflow the row:\n{text}"
+        );
+        assert!(
+            text.contains("..."),
+            "truncated branch name should show an ellipsis:\n{text}"
+        );
+    }
+
+    #[test]
+    fn pristine_long_branch_name_is_truncated_when_name_focused() {
+        let mut app = branch_source_app();
+        if let Mode::NewAgent {
+            focus,
+            name_pristine,
+            ..
+        } = &mut app.mode
+        {
+            *focus = NewAgentFocus::Name;
+            *name_pristine = true;
+        }
+
+        let full_name = "z-0506-138-feature-task-wizard-layout-polish";
+        let text = render_app(&app);
+
+        assert!(
+            !text.contains(full_name),
+            "focused pristine branch name should not overflow the row:\n{text}"
+        );
+        assert!(
+            text.contains("..."),
+            "focused pristine branch name should show an ellipsis:\n{text}"
+        );
+    }
+
+    #[test]
+    fn unfocused_branch_mode_value_stays_readable() {
+        let app = branch_source_app();
+        let buffer = render_app_buffer(&app);
+        let (x, y) = find_text_pos(&buffer, "New").expect("missing branch mode value");
+
+        assert_eq!(buffer[(x, y)].fg, TEXT);
     }
 
     #[test]
