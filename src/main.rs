@@ -401,7 +401,7 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                 // Swallow errors — offline/VPN-down shouldn't block the wizard.
                 let _ = agent::fetch_origin(&repo).await;
                 let branches = agent::list_branches(&repo).await.unwrap_or_default();
-                let _ = tx.send(Action::BranchesLoaded { branches });
+                let _ = tx.send(Action::BranchesLoaded { repo, branches });
             });
         }
         Command::CaptureActivity { session_name } => {
@@ -451,9 +451,10 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                             agent::create_session(&session_name, &worktree_path, Some(&fresh_cmd))
                                 .await
                         {
-                            let _ = tx.send(Action::AgentFailed {
+                            let _ = tx.send(Action::AgentSessionFailed {
                                 session: session_name,
                                 error: e,
+                                worktree_path,
                             });
                             return;
                         }
@@ -464,7 +465,53 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                         });
                     }
                     Err(e) => {
-                        let _ = tx.send(Action::AgentFailed {
+                        let _ = tx.send(Action::AgentSetupFailed {
+                            session: session_name,
+                            error: e,
+                        });
+                    }
+                }
+            });
+        }
+        Command::PrepareGitlabMrBranch {
+            repo,
+            mr_iid,
+            branch,
+            session_name,
+            agent_name,
+            fresh_cmd,
+        } => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = agent::prepare_gitlab_mr_branch(&repo, mr_iid, &branch).await {
+                    let _ = tx.send(Action::AgentSetupFailed {
+                        session: session_name,
+                        error: e,
+                    });
+                    return;
+                }
+
+                match agent::create_worktree(&repo, &branch, false, None, &agent_name).await {
+                    Ok(worktree_path) => {
+                        if let Err(e) =
+                            agent::create_session(&session_name, &worktree_path, Some(&fresh_cmd))
+                                .await
+                        {
+                            let _ = tx.send(Action::AgentSessionFailed {
+                                session: session_name,
+                                error: e,
+                                worktree_path,
+                            });
+                            return;
+                        }
+                        let _ = tx.send(Action::AgentReady {
+                            branch,
+                            session: session_name,
+                            worktree_path,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Action::AgentSetupFailed {
                             session: session_name,
                             error: e,
                         });
@@ -637,6 +684,24 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                 }
             });
         }
+        Command::LoadGitlabIssues(repo) => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let result = crate::gitlab::list_assigned_issues(&repo)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(Action::GitlabIssuesLoaded { repo, result });
+            });
+        }
+        Command::LoadGitlabMrs(repo) => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let result = crate::gitlab::list_review_merge_requests(&repo)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(Action::GitlabMrsLoaded { repo, result });
+            });
+        }
         Command::Attach(_) => unreachable!("Attach handled by dispatch"),
     }
 }
@@ -701,6 +766,61 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn missing_repo(suffix: &str) -> std::path::PathBuf {
+        let repo = std::env::temp_dir().join(format!(
+            "z-wizard-missing-repo-{suffix}-{}",
+            std::process::id()
+        ));
+        assert!(!repo.exists());
+        repo
+    }
+
+    #[tokio::test]
+    async fn execute_load_gitlab_issues_sends_repo_aware_result_on_error() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let repo = missing_repo("issues");
+
+        execute(Command::LoadGitlabIssues(repo.clone()), &tx);
+
+        let action = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("load issues action")
+            .expect("action");
+        match action {
+            Action::GitlabIssuesLoaded {
+                repo: action_repo,
+                result,
+            } => {
+                assert_eq!(action_repo, repo);
+                assert!(result.is_err());
+            }
+            other => panic!("expected GitlabIssuesLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_load_gitlab_mrs_sends_repo_aware_result_on_error() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let repo = missing_repo("mrs");
+
+        execute(Command::LoadGitlabMrs(repo.clone()), &tx);
+
+        let action = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("load MRs action")
+            .expect("action");
+        match action {
+            Action::GitlabMrsLoaded {
+                repo: action_repo,
+                result,
+            } => {
+                assert_eq!(action_repo, repo);
+                assert!(result.is_err());
+            }
+            other => panic!("expected GitlabMrsLoaded, got {other:?}"),
+        }
     }
 
     #[test]
