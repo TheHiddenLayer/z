@@ -318,6 +318,7 @@ pub async fn list_branches(repo_path: &Path) -> Result<Vec<String>, String> {
         .arg(repo_path)
         .args([
             "for-each-ref",
+            "--sort=-committerdate",
             "--format=%(refname)",
             "refs/heads/",
             "refs/remotes/origin/",
@@ -331,7 +332,8 @@ pub async fn list_branches(repo_path: &Path) -> Result<Vec<String>, String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut branches = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let name = if let Some(local) = line.strip_prefix("refs/heads/") {
             local.to_string()
@@ -343,9 +345,11 @@ pub async fn list_branches(repo_path: &Path) -> Result<Vec<String>, String> {
         } else {
             continue;
         };
-        seen.insert(name);
+        if seen.insert(name.clone()) {
+            branches.push(name);
+        }
     }
-    Ok(seen.into_iter().collect())
+    Ok(branches)
 }
 
 pub async fn list_sessions() -> Vec<TmuxSession> {
@@ -802,6 +806,17 @@ pub async fn discover_all(repos: &[PathBuf]) -> Vec<Agent> {
         for (agent, (_, _, base)) in agents.iter_mut().zip(triples) {
             agent.base_branch = base;
         }
+        // Order agents by worktree mtime descending. Git's `worktree list`
+        // returns entries in `.git/worktrees/` readdir order which is
+        // alphabetical on most filesystems; surface recently-touched
+        // worktrees first instead.
+        agents.sort_by_cached_key(|a| {
+            std::cmp::Reverse(
+                std::fs::metadata(&a.worktree_path)
+                    .and_then(|m| m.modified())
+                    .ok(),
+            )
+        });
         all_agents.append(&mut agents);
     }
 
