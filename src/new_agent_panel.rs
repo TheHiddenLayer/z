@@ -1,0 +1,762 @@
+use crate::app::{App, BranchMode, Mode, NewAgentFocus, NewAgentSource, RemoteList};
+use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
+use crate::style::{DIM, TEXT, footer_hint};
+use ratatui::{
+    buffer::Buffer,
+    layout::{Constraint, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{
+        List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        StatefulWidget, Widget, Wrap,
+    },
+};
+
+const NEW_AGENT_LABEL_W: u16 = 14;
+
+pub struct NewAgentPanelWidget<'a> {
+    app: &'a App,
+}
+
+impl<'a> NewAgentPanelWidget<'a> {
+    pub const fn new(app: &'a App) -> Self {
+        Self { app }
+    }
+}
+
+impl Widget for &NewAgentPanelWidget<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if matches!(self.app.mode, Mode::NewAgent { .. }) {
+            render_new_agent_panel(self.app, area, buf);
+        }
+    }
+}
+
+fn source_label(source: NewAgentSource) -> &'static str {
+    match source {
+        NewAgentSource::Issue => "issue",
+        NewAgentSource::Mr => "mr",
+        NewAgentSource::Branch => "branch",
+    }
+}
+
+fn remote_status_line(message: &str, label_w: u16) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" ".repeat(label_w as usize)),
+        Span::styled(message.to_string(), Style::default().fg(DIM)),
+    ])
+}
+
+fn matches_source_query(label: &str, query: &str) -> bool {
+    let trimmed = query.trim();
+    trimmed.is_empty()
+        || label
+            .to_ascii_lowercase()
+            .contains(&trimmed.to_ascii_lowercase())
+}
+
+fn selectable_source_line(label: String, selected: bool, label_w: u16) -> Line<'static> {
+    let style = if selected {
+        Style::default().fg(TEXT)
+    } else {
+        Style::default().fg(DIM)
+    };
+    let indicator = if selected { "\u{2502} " } else { "  " };
+    Line::from(vec![
+        Span::raw(" ".repeat(label_w as usize)),
+        Span::styled(indicator, style),
+        Span::styled(label, style),
+    ])
+}
+
+fn issue_label(issue: &GitlabIssue) -> String {
+    format!("#{} {}", issue.iid, issue.title)
+}
+
+fn mr_label(mr: &GitlabMergeRequest) -> String {
+    format!("!{} {} {}", mr.iid, mr.title, mr.source_branch)
+}
+
+fn filtered_issue_indices(issues: &[GitlabIssue], query: &str) -> Vec<usize> {
+    issues
+        .iter()
+        .enumerate()
+        .filter_map(|(index, issue)| {
+            matches_source_query(&issue_label(issue), query).then_some(index)
+        })
+        .collect()
+}
+
+fn filtered_mr_indices(mrs: &[GitlabMergeRequest], query: &str) -> Vec<usize> {
+    mrs.iter()
+        .enumerate()
+        .filter_map(|(index, mr)| matches_source_query(&mr_label(mr), query).then_some(index))
+        .collect()
+}
+
+fn filtered_issue_lines(
+    issues: &RemoteList<GitlabIssue>,
+    query: &str,
+    selected_index: usize,
+    label_w: u16,
+) -> Vec<Line<'static>> {
+    match issues {
+        RemoteList::Idle | RemoteList::Loading => {
+            vec![remote_status_line("loading assigned issues...", label_w)]
+        }
+        RemoteList::Failed(message) => {
+            vec![remote_status_line(&format!("error: {message}"), label_w)]
+        }
+        RemoteList::Loaded(items) => {
+            let indices = filtered_issue_indices(items, query);
+            if indices.is_empty() {
+                let message = if items.is_empty() {
+                    "no assigned issues"
+                } else {
+                    "no matching issues"
+                };
+                return vec![remote_status_line(message, label_w)];
+            }
+            indices
+                .into_iter()
+                .map(|index| {
+                    selectable_source_line(
+                        issue_label(&items[index]),
+                        index == selected_index,
+                        label_w,
+                    )
+                })
+                .collect()
+        }
+    }
+}
+
+fn filtered_mr_lines(
+    mrs: &RemoteList<GitlabMergeRequest>,
+    query: &str,
+    selected_index: usize,
+    label_w: u16,
+) -> Vec<Line<'static>> {
+    match mrs {
+        RemoteList::Idle | RemoteList::Loading => {
+            vec![remote_status_line("loading review MRs...", label_w)]
+        }
+        RemoteList::Failed(message) => {
+            vec![remote_status_line(&format!("error: {message}"), label_w)]
+        }
+        RemoteList::Loaded(items) => {
+            let indices = filtered_mr_indices(items, query);
+            if indices.is_empty() {
+                let message = if items.is_empty() {
+                    "no MRs needing review"
+                } else {
+                    "no matching MRs"
+                };
+                return vec![remote_status_line(message, label_w)];
+            }
+            indices
+                .into_iter()
+                .map(|index| {
+                    selectable_source_line(
+                        mr_label(&items[index]),
+                        index == selected_index,
+                        label_w,
+                    )
+                })
+                .collect()
+        }
+    }
+}
+
+fn source_list_height(
+    source: NewAgentSource,
+    issues: &RemoteList<GitlabIssue>,
+    mrs: &RemoteList<GitlabMergeRequest>,
+    branches: &[String],
+    query: &str,
+) -> u16 {
+    let count = match source {
+        NewAgentSource::Issue => match issues {
+            RemoteList::Loaded(items) => filtered_issue_indices(items, query).len(),
+            _ => 1,
+        },
+        NewAgentSource::Mr => match mrs {
+            RemoteList::Loaded(items) => filtered_mr_indices(items, query).len(),
+            _ => 1,
+        },
+        NewAgentSource::Branch => branches.len(),
+    };
+    count.clamp(1, 6) as u16
+}
+
+fn list_scroll_offset(selected_pos: Option<usize>, visible_rows: u16) -> usize {
+    let visible = visible_rows as usize;
+    selected_pos
+        .filter(|_| visible > 0)
+        .map(|pos| pos.saturating_add(1).saturating_sub(visible))
+        .unwrap_or(0)
+}
+
+fn list_content_area(area: Rect, needs_scrollbar: bool) -> Rect {
+    if needs_scrollbar && area.width > 1 {
+        Rect {
+            width: area.width.saturating_sub(1),
+            ..area
+        }
+    } else {
+        area
+    }
+}
+
+fn render_selectable_list(
+    lines: Vec<Line<'static>>,
+    selected_pos: Option<usize>,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let visible_rows = area.height;
+    let offset = list_scroll_offset(selected_pos, visible_rows);
+    let content_len = lines.len();
+    let needs_scrollbar = content_len > visible_rows as usize && area.width > 1;
+    let list_area = list_content_area(area, needs_scrollbar);
+
+    let mut state = ListState::default()
+        .with_selected(selected_pos)
+        .with_offset(offset);
+    let items = lines.into_iter().map(ListItem::new).collect::<Vec<_>>();
+    let list = List::new(items).style(Style::default().fg(DIM));
+
+    StatefulWidget::render(list, list_area, buf, &mut state);
+
+    if needs_scrollbar {
+        let mut scrollbar_state = ScrollbarState::new(content_len)
+            .viewport_content_length(visible_rows as usize)
+            .position(state.offset());
+        StatefulWidget::render(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight).style(Style::default().fg(DIM)),
+            area,
+            buf,
+            &mut scrollbar_state,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NewAgentLayoutSizing {
+    top_padding: u16,
+    gap_after_source: u16,
+    gap_after_agent: u16,
+    gap_after_repo: u16,
+    gap_after_list: u16,
+    list_height: u16,
+    #[cfg(test)]
+    required_non_list_height: u16,
+}
+
+impl NewAgentLayoutSizing {
+    #[cfg(test)]
+    fn optional_spacer_height(self) -> u16 {
+        self.top_padding
+            + self.gap_after_source
+            + self.gap_after_agent
+            + self.gap_after_repo
+            + self.gap_after_list
+    }
+
+    #[cfg(test)]
+    fn total_height(self) -> u16 {
+        self.required_non_list_height + self.list_height + self.optional_spacer_height()
+    }
+
+    fn source_area_height(self, show_gitlab_source: bool) -> u16 {
+        self.list_height + u16::from(show_gitlab_source)
+    }
+}
+
+fn new_agent_layout_sizing(
+    inner_height: u16,
+    desired_list_height: u16,
+    show_gitlab_source: bool,
+    show_branch_toggle: bool,
+    show_name_row: bool,
+) -> NewAgentLayoutSizing {
+    let required_non_list_height = 8
+        + u16::from(show_gitlab_source)
+        + u16::from(show_branch_toggle)
+        + u16::from(show_name_row);
+    let available_for_list = inner_height.saturating_sub(required_non_list_height).max(1);
+    let list_height = desired_list_height.clamp(1, 6).min(available_for_list);
+    let mut optional_space = inner_height.saturating_sub(required_non_list_height + list_height);
+
+    let mut take_spacer = || {
+        let row = u16::from(optional_space > 0);
+        optional_space = optional_space.saturating_sub(row);
+        row
+    };
+
+    NewAgentLayoutSizing {
+        top_padding: take_spacer(),
+        gap_after_source: take_spacer(),
+        gap_after_agent: take_spacer(),
+        gap_after_repo: take_spacer(),
+        gap_after_list: take_spacer(),
+        list_height,
+        #[cfg(test)]
+        required_non_list_height,
+    }
+}
+
+fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
+    let inner = area;
+
+    let Mode::NewAgent {
+        repo_index,
+        source,
+        source_query,
+        source_index,
+        issues,
+        mrs,
+        selected_issue: _,
+        selected_mr: _,
+        branch_mode,
+        prompt,
+        prompt_mode: _,
+        focus,
+        base_index,
+        branches,
+        existing_branches,
+        branch_name,
+        name_pristine,
+        agent_name,
+    } = &app.mode
+    else {
+        return;
+    };
+
+    let repos = app.config.resolved_repos();
+    let repo_name = repos
+        .get(*repo_index)
+        .and_then(|r| r.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("?");
+
+    let active_list: &[String] = match branch_mode {
+        BranchMode::New => branches,
+        BranchMode::Existing => existing_branches,
+    };
+    let label_w = NEW_AGENT_LABEL_W;
+    let desired_list_height = source_list_height(*source, issues, mrs, active_list, source_query);
+    let show_gitlab_source = matches!(source, NewAgentSource::Issue | NewAgentSource::Mr);
+    let show_branch_controls = matches!(source, NewAgentSource::Branch | NewAgentSource::Issue);
+    let show_branch_toggle = matches!(source, NewAgentSource::Branch);
+    let show_name = show_branch_controls
+        && matches!(branch_mode, BranchMode::New)
+        && !matches!(source, NewAgentSource::Issue);
+    let show_issue_name = matches!(source, NewAgentSource::Issue);
+    let show_name_row = show_name || show_issue_name;
+    let name_rows = u16::from(show_name_row);
+    let sizing = new_agent_layout_sizing(
+        inner.height,
+        desired_list_height,
+        show_gitlab_source,
+        show_branch_toggle,
+        show_name_row,
+    );
+
+    let chunks = Layout::vertical([
+        Constraint::Length(sizing.top_padding),
+        Constraint::Length(1), // Start from row
+        Constraint::Length(sizing.gap_after_source),
+        Constraint::Length(1), // Agent row
+        Constraint::Length(sizing.gap_after_agent),
+        Constraint::Length(1), // Repo row
+        Constraint::Length(sizing.gap_after_repo),
+        Constraint::Length(if show_branch_toggle { 1 } else { 0 }),
+        Constraint::Length(sizing.source_area_height(show_gitlab_source)),
+        Constraint::Length(sizing.gap_after_list),
+        Constraint::Length(name_rows), // Name row
+        Constraint::Length(1),         // Prompt label
+        Constraint::Min(3),            // Prompt area
+        Constraint::Length(1),         // hint bar
+    ])
+    .split(inner);
+
+    let label_style = |focused: bool| {
+        if focused {
+            Style::default().fg(TEXT)
+        } else {
+            Style::default().fg(DIM)
+        }
+    };
+    let val_style = |focused: bool| {
+        if focused {
+            Style::default().fg(TEXT)
+        } else {
+            Style::default().fg(DIM)
+        }
+    };
+
+    // Picker row: "│ Label    value" when focused, "  Label    value" when not.
+    // Selection is encoded by the left bar plus whole-row brightness contrast —
+    // focused rows TEXT, unfocused rows DIM — matching the agent table's
+    // convention. Without it the focus signal is too subtle in a vertical stack.
+    let picker_row = |label: &str, value: &str, focused: bool| -> Line<'static> {
+        let indicator = if focused { "\u{2502} " } else { "  " };
+        let indicator_style = if focused {
+            Style::default().fg(TEXT)
+        } else {
+            Style::default()
+        };
+        let row_style = if focused {
+            Style::default().fg(TEXT)
+        } else {
+            Style::default().fg(DIM)
+        };
+        let label_style = row_style;
+        let value_style = row_style;
+        let label_field_w = label_w as usize;
+        // Label occupies the label column; value starts at column label_w + 2.
+        let label_padding = label_field_w.saturating_sub(label.len() + 2);
+        Line::from(vec![
+            Span::styled(indicator.to_string(), indicator_style),
+            Span::styled(label.to_string(), label_style),
+            Span::raw(" ".repeat(label_padding)),
+            Span::styled(value.to_string(), value_style),
+        ])
+    };
+
+    // --- Source row ---
+    let is_source = matches!(focus, NewAgentFocus::Source);
+    let source_line = picker_row("Start from", source_label(*source), is_source);
+    Paragraph::new(source_line).render(chunks[1], buf);
+
+    // --- Agent row ---
+    let is_agent = matches!(focus, NewAgentFocus::Agent);
+    let agent_line = picker_row("Agent", agent_name.as_str(), is_agent);
+    Paragraph::new(agent_line).render(chunks[3], buf);
+
+    // --- Repo row ---
+    let is_repo = matches!(focus, NewAgentFocus::Repo);
+    let repo_line = picker_row("Repo", repo_name, is_repo);
+    Paragraph::new(repo_line).render(chunks[5], buf);
+
+    // --- Branch toggle row ---
+    if show_branch_toggle {
+        let is_toggle = matches!(focus, NewAgentFocus::BranchToggle);
+        let mode_label = match branch_mode {
+            BranchMode::New => "New",
+            BranchMode::Existing => "Existing",
+        };
+        let toggle_line = picker_row("Branch", mode_label, is_toggle);
+        Paragraph::new(toggle_line).render(chunks[7], buf);
+    }
+
+    // --- Source or branch list ---
+    let list_slot = chunks[8];
+    if show_gitlab_source {
+        let source_chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(sizing.list_height),
+        ])
+        .split(list_slot);
+
+        let is_search = matches!(focus, NewAgentFocus::Search);
+        let search_value = if source_query.is_empty() {
+            match source {
+                NewAgentSource::Issue => "filter issues...",
+                NewAgentSource::Mr => "filter MRs...",
+                NewAgentSource::Branch => "",
+            }
+        } else {
+            source_query.as_str()
+        };
+        let search_line = picker_row("Search", search_value, is_search);
+        Paragraph::new(search_line).render(source_chunks[0], buf);
+
+        let list_area = source_chunks[1];
+        let all_lines = match source {
+            NewAgentSource::Issue => {
+                filtered_issue_lines(issues, source_query, *source_index, label_w)
+            }
+            NewAgentSource::Mr => filtered_mr_lines(mrs, source_query, *source_index, label_w),
+            NewAgentSource::Branch => Vec::new(),
+        };
+        let selected_pos = match source {
+            NewAgentSource::Issue => match issues {
+                RemoteList::Loaded(items) => filtered_issue_indices(items, source_query)
+                    .into_iter()
+                    .position(|index| index == *source_index),
+                _ => None,
+            },
+            NewAgentSource::Mr => match mrs {
+                RemoteList::Loaded(items) => filtered_mr_indices(items, source_query)
+                    .into_iter()
+                    .position(|index| index == *source_index),
+                _ => None,
+            },
+            NewAgentSource::Branch => None,
+        };
+        render_selectable_list(all_lines, selected_pos, list_area, buf);
+    } else {
+        let list_area = list_slot;
+        if active_list.is_empty() {
+            let empty_msg = match branch_mode {
+                BranchMode::New => "loading...",
+                BranchMode::Existing => "no existing branches",
+            };
+            Paragraph::new(remote_status_line(empty_msg, label_w)).render(list_area, buf);
+        } else {
+            let lines = active_list
+                .iter()
+                .enumerate()
+                .map(|(i, b)| selectable_source_line(b.clone(), i == *base_index, label_w))
+                .collect();
+            render_selectable_list(lines, Some(*base_index), list_area, buf);
+        }
+    }
+
+    // --- Name row ---
+    if show_name {
+        let is_name = matches!(focus, NewAgentFocus::Name);
+        let name_display = if is_name && *name_pristine {
+            // Pristine auto-suggested name: dim + italic so it reads as a
+            // placeholder that will be replaced the moment the user types.
+            Span::styled(
+                branch_name.as_str(),
+                Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+            )
+        } else {
+            let cursor = if is_name { "_" } else { "" };
+            Span::styled(format!("{branch_name}{cursor}"), val_style(is_name))
+        };
+        let name_line = Line::from(vec![
+            Span::styled("  Name", label_style(is_name)),
+            Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
+            name_display,
+        ]);
+        Paragraph::new(name_line).render(chunks[10], buf);
+    } else if show_issue_name {
+        let name_line = Line::from(vec![
+            Span::styled("  Name", Style::default().fg(DIM)),
+            Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
+            Span::styled(branch_name.as_str(), Style::default().fg(DIM)),
+        ]);
+        Paragraph::new(name_line).render(chunks[10], buf);
+    }
+
+    // --- Prompt label ---
+    let is_prompt = matches!(focus, NewAgentFocus::Prompt);
+    let prompt_label = Line::from(Span::styled("  Prompt", label_style(is_prompt)));
+    Paragraph::new(prompt_label).render(chunks[11], buf);
+
+    // --- Prompt area ---
+    let prompt_area = chunks[12];
+    if prompt.is_empty() {
+        let placeholder = if is_prompt {
+            Line::from(vec![
+                Span::raw(" ".repeat(label_w as usize)),
+                Span::styled("_", Style::default().fg(TEXT)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::raw(" ".repeat(label_w as usize)),
+                Span::styled("describe the task...", Style::default().fg(DIM)),
+            ])
+        };
+        Paragraph::new(placeholder).render(prompt_area, buf);
+    } else {
+        let cursor = if is_prompt { "_" } else { "" };
+        let text = format!("{}{}{}", " ".repeat(label_w as usize), prompt, cursor);
+        let width = prompt_area.width.max(1) as usize;
+        let line_count: u16 = text
+            .split('\n')
+            .map(|l| {
+                if l.is_empty() {
+                    1
+                } else {
+                    ((l.len() as u16).saturating_add(width as u16 - 1)) / width as u16
+                }
+            })
+            .sum();
+        let scroll = line_count.saturating_sub(prompt_area.height);
+        let paragraph = Paragraph::new(text)
+            .style(Style::default().fg(TEXT))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0));
+        paragraph.render(prompt_area, buf);
+    }
+
+    // --- Hint bar ---
+    let hint_line = match focus {
+        NewAgentFocus::Source
+        | NewAgentFocus::Agent
+        | NewAgentFocus::Repo
+        | NewAgentFocus::BranchToggle => {
+            footer_hint(&[("←/→", "cycle"), ("tab", "next"), ("q/esc", "cancel")])
+        }
+        NewAgentFocus::Search => {
+            footer_hint(&[("type", "filter"), ("tab", "list"), ("esc", "cancel")])
+        }
+        NewAgentFocus::SourceList | NewAgentFocus::BranchList => footer_hint(&[
+            ("↑/k", "up"),
+            ("↓/j", "down"),
+            ("enter", "start"),
+            ("tab", "next"),
+        ]),
+        NewAgentFocus::Name => footer_hint(&[("tab", "next"), ("esc", "cancel")]),
+        NewAgentFocus::Prompt => footer_hint(&[
+            ("enter", "start"),
+            ("alt+enter", "newline"),
+            ("ctrl+r", "reset"),
+            ("esc", "cancel"),
+        ]),
+    };
+    // Indent the hint line under the form's value column for visual continuity.
+    let mut spans = vec![Span::raw(" ".repeat(label_w as usize))];
+    spans.extend(hint_line.spans);
+    Paragraph::new(Line::from(spans)).render(chunks[13], buf);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn issue(iid: u64, title: &str) -> GitlabIssue {
+        GitlabIssue {
+            iid,
+            title: title.to_string(),
+            description: None,
+            web_url: None,
+        }
+    }
+
+    fn mr(iid: u64, title: &str, source_branch: &str) -> GitlabMergeRequest {
+        GitlabMergeRequest {
+            iid,
+            title: title.to_string(),
+            description: None,
+            web_url: None,
+            source_branch: source_branch.to_string(),
+            target_branch: None,
+        }
+    }
+
+    #[test]
+    fn source_label_returns_lowercase_gitlab_source_names() {
+        assert_eq!(source_label(NewAgentSource::Issue), "issue");
+        assert_eq!(source_label(NewAgentSource::Mr), "mr");
+        assert_eq!(source_label(NewAgentSource::Branch), "branch");
+    }
+
+    #[test]
+    fn filtered_issue_lines_render_number_title_and_selection() {
+        let issues = RemoteList::Loaded(vec![
+            issue(123, "Fix agent startup"),
+            issue(456, "Document setup"),
+        ]);
+
+        let lines = filtered_issue_lines(&issues, "agent", 0, 4);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(line_text(&lines[0]), "    \u{2502} #123 Fix agent startup");
+    }
+
+    #[test]
+    fn filtered_issue_lines_distinguish_empty_from_no_matches() {
+        let empty = filtered_issue_lines(&RemoteList::Loaded(vec![]), "", 0, 2);
+        assert_eq!(line_text(&empty[0]), "  no assigned issues");
+
+        let issues = RemoteList::Loaded(vec![issue(123, "Fix agent startup")]);
+        let no_match = filtered_issue_lines(&issues, "billing", 0, 2);
+        assert_eq!(line_text(&no_match[0]), "  no matching issues");
+    }
+
+    #[test]
+    fn filtered_mr_lines_include_source_branch() {
+        let mrs = RemoteList::Loaded(vec![
+            mr(7, "Review renderer", "feature/render"),
+            mr(8, "Update docs", "docs/readme"),
+        ]);
+
+        let lines = filtered_mr_lines(&mrs, "render", 0, 2);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            line_text(&lines[0]),
+            "  \u{2502} !7 Review renderer feature/render"
+        );
+    }
+
+    #[test]
+    fn filtered_mr_lines_distinguish_empty_from_no_matches() {
+        let empty = filtered_mr_lines(&RemoteList::Loaded(vec![]), "", 0, 2);
+        assert_eq!(line_text(&empty[0]), "  no MRs needing review");
+
+        let mrs = RemoteList::Loaded(vec![mr(7, "Review renderer", "feature/render")]);
+        let no_match = filtered_mr_lines(&mrs, "billing", 0, 2);
+        assert_eq!(line_text(&no_match[0]), "  no matching MRs");
+    }
+
+    #[test]
+    fn remote_status_line_is_indented() {
+        let line = remote_status_line("loading assigned issues...", 3);
+
+        assert_eq!(line_text(&line), "   loading assigned issues...");
+    }
+
+    #[test]
+    fn list_scroll_offset_keeps_selected_last_visible() {
+        assert_eq!(list_scroll_offset(Some(0), 6), 0);
+        assert_eq!(list_scroll_offset(Some(5), 6), 0);
+        assert_eq!(list_scroll_offset(Some(6), 6), 1);
+        assert_eq!(list_scroll_offset(Some(7), 6), 2);
+        assert_eq!(list_scroll_offset(None, 6), 0);
+        assert_eq!(list_scroll_offset(Some(7), 0), 0);
+    }
+
+    #[test]
+    fn list_content_area_reserves_scrollbar_column_only_when_needed() {
+        let area = Rect::new(2, 3, 20, 6);
+
+        assert_eq!(list_content_area(area, false), area);
+        assert_eq!(list_content_area(area, true), Rect::new(2, 3, 19, 6));
+        assert_eq!(
+            list_content_area(Rect::new(0, 0, 1, 6), true),
+            Rect::new(0, 0, 1, 6)
+        );
+    }
+
+    #[test]
+    fn layout_sizing_caps_list_to_one_when_inner_height_is_tight() {
+        let sizing = new_agent_layout_sizing(11, 6, true, false, true);
+
+        assert_eq!(sizing.list_height, 1);
+        assert_eq!(sizing.total_height(), 11);
+        assert_eq!(sizing.optional_spacer_height(), 0);
+    }
+
+    #[test]
+    fn layout_sizing_preserves_required_rows_at_minimum_supported_height() {
+        let sizing = new_agent_layout_sizing(12, 6, true, true, true);
+
+        assert_eq!(sizing.list_height, 1);
+        assert_eq!(sizing.total_height(), 12);
+        assert_eq!(sizing.optional_spacer_height(), 0);
+    }
+
+    #[test]
+    fn layout_sizing_allows_six_list_rows_when_height_is_available() {
+        let sizing = new_agent_layout_sizing(21, 6, true, false, true);
+
+        assert_eq!(sizing.list_height, 6);
+        assert_eq!(sizing.total_height(), 21);
+        assert_eq!(sizing.optional_spacer_height(), 5);
+    }
+}
