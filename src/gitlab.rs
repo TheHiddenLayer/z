@@ -1,4 +1,9 @@
+use std::fmt;
+use std::path::Path;
+
+use serde::Deserialize;
 use serde_json::Value;
+use tokio::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MrState {
@@ -38,6 +43,183 @@ pub enum MrDisplayKind {
 pub struct MrDisplay {
     pub glyph: &'static str,
     pub kind: MrDisplayKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GitlabIssue {
+    pub iid: u64,
+    pub title: String,
+    pub description: Option<String>,
+    pub web_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GitlabMergeRequest {
+    pub iid: u64,
+    pub title: String,
+    pub description: Option<String>,
+    pub web_url: Option<String>,
+    pub source_branch: String,
+    pub target_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GitlabError {
+    Command(String),
+    Json(String),
+    MissingField(&'static str),
+}
+
+impl fmt::Display for GitlabError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GitlabError::Command(message) => f.write_str(message),
+            GitlabError::Json(message) => write!(f, "could not parse glab JSON: {message}"),
+            GitlabError::MissingField(field) => write!(f, "glab JSON missing field: {field}"),
+        }
+    }
+}
+
+impl From<serde_json::Error> for GitlabError {
+    fn from(value: serde_json::Error) -> Self {
+        GitlabError::Json(value.to_string())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawIssue {
+    iid: Option<u64>,
+    title: Option<String>,
+    description: Option<String>,
+    #[serde(alias = "webUrl")]
+    web_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMergeRequest {
+    iid: Option<u64>,
+    title: Option<String>,
+    description: Option<String>,
+    #[serde(alias = "webUrl")]
+    web_url: Option<String>,
+    #[serde(alias = "sourceBranch")]
+    source_branch: Option<String>,
+    #[serde(alias = "targetBranch")]
+    target_branch: Option<String>,
+}
+
+fn clean_optional(value: Option<String>) -> Option<String> {
+    value.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+pub fn parse_issues(json: &str) -> Result<Vec<GitlabIssue>, GitlabError> {
+    let raw: Vec<RawIssue> = serde_json::from_str(json)?;
+    raw.into_iter()
+        .map(|issue| {
+            Ok(GitlabIssue {
+                iid: issue.iid.ok_or(GitlabError::MissingField("iid"))?,
+                title: issue.title.ok_or(GitlabError::MissingField("title"))?,
+                description: clean_optional(issue.description),
+                web_url: clean_optional(issue.web_url),
+            })
+        })
+        .collect()
+}
+
+pub fn parse_merge_requests(json: &str) -> Result<Vec<GitlabMergeRequest>, GitlabError> {
+    let raw: Vec<RawMergeRequest> = serde_json::from_str(json)?;
+    raw.into_iter()
+        .map(|mr| {
+            Ok(GitlabMergeRequest {
+                iid: mr.iid.ok_or(GitlabError::MissingField("iid"))?,
+                title: mr.title.ok_or(GitlabError::MissingField("title"))?,
+                description: clean_optional(mr.description),
+                web_url: clean_optional(mr.web_url),
+                source_branch: mr
+                    .source_branch
+                    .ok_or(GitlabError::MissingField("source_branch"))?,
+                target_branch: clean_optional(mr.target_branch),
+            })
+        })
+        .collect()
+}
+
+pub fn command_failure(command: &str, stderr: &str) -> GitlabError {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        GitlabError::Command(format!("{command} failed"))
+    } else {
+        GitlabError::Command(format!("{command}: {trimmed}"))
+    }
+}
+
+async fn run_glab_json(repo: &Path, args: &[&str], label: &str) -> Result<String, GitlabError> {
+    let output = Command::new("glab")
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                GitlabError::Command("glab not found".to_string())
+            } else {
+                GitlabError::Command(format!("{label}: {e}"))
+            }
+        })?;
+
+    if !output.status.success() {
+        return Err(command_failure(
+            label,
+            &String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub async fn list_assigned_issues(repo: &Path) -> Result<Vec<GitlabIssue>, GitlabError> {
+    let json = run_glab_json(
+        repo,
+        &[
+            "issue",
+            "list",
+            "--assignee=@me",
+            "--output",
+            "json",
+            "--per-page",
+            "30",
+        ],
+        "issue list",
+    )
+    .await?;
+    parse_issues(&json)
+}
+
+pub async fn list_review_merge_requests(
+    repo: &Path,
+) -> Result<Vec<GitlabMergeRequest>, GitlabError> {
+    let json = run_glab_json(
+        repo,
+        &[
+            "mr",
+            "list",
+            "--reviewer=@me",
+            "--output",
+            "json",
+            "--per-page",
+            "30",
+        ],
+        "mr list",
+    )
+    .await?;
+    parse_merge_requests(&json)
 }
 
 pub fn parse_mr_list(output: &str) -> Result<Option<MergeRequest>, String> {
@@ -317,6 +499,99 @@ fn strings(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| (*s).to_string()).collect()
 }
 
+fn push_non_empty(parts: &mut Vec<String>, value: Option<&str>) {
+    if let Some(value) = value {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+    }
+}
+
+pub fn issue_prompt(issue: &GitlabIssue) -> String {
+    let mut parts = vec![format!(
+        "Work on GitLab issue #{}: {}",
+        issue.iid, issue.title
+    )];
+    push_non_empty(&mut parts, issue.web_url.as_deref());
+    if let Some(description) = issue
+        .description
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        parts.push(String::new());
+        parts.push(description.trim().to_string());
+    }
+    parts.join("\n")
+}
+
+pub fn mr_prompt(mr: &GitlabMergeRequest) -> String {
+    let mut parts = vec![format!("Review GitLab MR !{}: {}", mr.iid, mr.title)];
+    let branch_line = match mr.target_branch.as_deref() {
+        Some(target) if !target.trim().is_empty() => {
+            format!("{} -> {}", mr.source_branch, target.trim())
+        }
+        _ => mr.source_branch.clone(),
+    };
+    parts.push(branch_line);
+    push_non_empty(&mut parts, mr.web_url.as_deref());
+    if let Some(description) = mr.description.as_deref().filter(|s| !s.trim().is_empty()) {
+        parts.push(String::new());
+        parts.push(description.trim().to_string());
+    }
+    parts.join("\n")
+}
+
+fn slug_title(title: &str) -> String {
+    let mut out = String::new();
+    let mut previous_dash = false;
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            previous_dash = false;
+        } else if !previous_dash {
+            out.push('-');
+            previous_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+pub fn issue_branch_name(issue: &GitlabIssue, date_str: &str, branches: &[String]) -> String {
+    let slug = slug_title(&issue.title);
+    let prefix = format!("z-{date_str}-{}-", issue.iid);
+    let max_slug_len = 64usize.saturating_sub(prefix.len()).max(1);
+    let mut trimmed_slug = slug.chars().take(max_slug_len).collect::<String>();
+    trimmed_slug = trimmed_slug.trim_matches('-').to_string();
+    if trimmed_slug.is_empty() {
+        trimmed_slug = "issue".to_string();
+    }
+
+    let base = format!("{prefix}{trimmed_slug}");
+    if !branches.iter().any(|b| b == &base) {
+        return base;
+    }
+
+    for n in 2.. {
+        let suffix = format!("-{n}");
+        let allowed = 64usize.saturating_sub(suffix.len());
+        let candidate_base = if base.len() > allowed {
+            base.chars()
+                .take(allowed)
+                .collect::<String>()
+                .trim_matches('-')
+                .to_string()
+        } else {
+            base.clone()
+        };
+        let candidate = format!("{candidate_base}{suffix}");
+        if !branches.iter().any(|b| b == &candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search must return")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,5 +806,225 @@ mod tests {
             pipeline_state: None,
             unresolved_count: None,
         }
+    }
+
+    #[test]
+    fn parse_issue_list_accepts_glab_json() {
+        let json = r#"
+        [
+          {
+            "iid": 1102,
+            "title": "Detect agents remotely",
+            "description": "Use remote shell profiles.",
+            "web_url": "https://gitlab.example.com/acme/example/-/issues/1102"
+          }
+        ]
+        "#;
+
+        let issues = parse_issues(json).unwrap();
+
+        assert_eq!(
+            issues,
+            vec![GitlabIssue {
+                iid: 1102,
+                title: "Detect agents remotely".to_string(),
+                description: Some("Use remote shell profiles.".to_string()),
+                web_url: Some(
+                    "https://gitlab.example.com/acme/example/-/issues/1102".to_string()
+                ),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_issue_list_accepts_camel_case_url() {
+        let json = r#"[{"iid":7,"title":"Small fix","webUrl":"https://gitlab/x/y/-/issues/7"}]"#;
+
+        let issues = parse_issues(json).unwrap();
+
+        assert_eq!(
+            issues[0].web_url.as_deref(),
+            Some("https://gitlab/x/y/-/issues/7")
+        );
+    }
+
+    #[test]
+    fn parse_mr_list_accepts_glab_json() {
+        let json = r#"
+        [
+          {
+            "iid": 184,
+            "title": "Use remote shell profiles",
+            "description": "Review remote profile detection.",
+            "web_url": "https://gitlab.example.com/acme/example/-/merge_requests/184",
+            "source_branch": "fix/remote-shell-profiles",
+            "target_branch": "main"
+          }
+        ]
+        "#;
+
+        let mrs = parse_merge_requests(json).unwrap();
+
+        assert_eq!(
+            mrs,
+            vec![GitlabMergeRequest {
+                iid: 184,
+                title: "Use remote shell profiles".to_string(),
+                description: Some("Review remote profile detection.".to_string()),
+                web_url: Some(
+                    "https://gitlab.example.com/acme/example/-/merge_requests/184".to_string()
+                ),
+                source_branch: "fix/remote-shell-profiles".to_string(),
+                target_branch: Some("main".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_mr_list_accepts_camel_case_branches() {
+        let json = r#"
+        [
+          {
+            "iid": 9,
+            "title": "Review me",
+            "sourceBranch": "feature/review-me",
+            "targetBranch": "develop",
+            "webUrl": "https://gitlab/x/y/-/merge_requests/9"
+          }
+        ]
+        "#;
+
+        let mrs = parse_merge_requests(json).unwrap();
+
+        assert_eq!(mrs[0].source_branch, "feature/review-me");
+        assert_eq!(mrs[0].target_branch.as_deref(), Some("develop"));
+        assert_eq!(
+            mrs[0].web_url.as_deref(),
+            Some("https://gitlab/x/y/-/merge_requests/9")
+        );
+    }
+
+    #[test]
+    fn parse_issue_list_rejects_missing_iid() {
+        let err = parse_issues(r#"[{"title":"No iid"}]"#).unwrap_err();
+
+        assert_eq!(err, GitlabError::MissingField("iid"));
+    }
+
+    #[test]
+    fn parse_mr_list_rejects_missing_source_branch() {
+        let err = parse_merge_requests(r#"[{"iid":1,"title":"No branch"}]"#).unwrap_err();
+
+        assert_eq!(err, GitlabError::MissingField("source_branch"));
+    }
+
+    #[test]
+    fn glab_error_message_mentions_missing_glab() {
+        let err = GitlabError::Command("glab not found".to_string());
+
+        assert_eq!(err.to_string(), "glab not found");
+    }
+
+    #[test]
+    fn command_failure_uses_stderr_when_available() {
+        let err = command_failure("issue list", "fatal: not authenticated\n");
+
+        assert_eq!(
+            err,
+            GitlabError::Command("issue list: fatal: not authenticated".to_string())
+        );
+    }
+
+    #[test]
+    fn command_failure_falls_back_to_generic_message() {
+        let err = command_failure("mr list", "");
+
+        assert_eq!(err, GitlabError::Command("mr list failed".to_string()));
+    }
+
+    #[test]
+    fn issue_prompt_includes_title_url_and_description() {
+        let issue = GitlabIssue {
+            iid: 1102,
+            title: "Detect agents remotely".to_string(),
+            description: Some("Use remote shell profiles.".to_string()),
+            web_url: Some("https://gitlab/x/y/-/issues/1102".to_string()),
+        };
+
+        assert_eq!(
+            issue_prompt(&issue),
+            "Work on GitLab issue #1102: Detect agents remotely\nhttps://gitlab/x/y/-/issues/1102\n\nUse remote shell profiles."
+        );
+    }
+
+    #[test]
+    fn mr_prompt_includes_branches_when_target_exists() {
+        let mr = GitlabMergeRequest {
+            iid: 184,
+            title: "Use remote shell profiles".to_string(),
+            description: Some("Review remote profile detection.".to_string()),
+            web_url: Some("https://gitlab/x/y/-/merge_requests/184".to_string()),
+            source_branch: "fix/remote-shell-profiles".to_string(),
+            target_branch: Some("main".to_string()),
+        };
+
+        assert_eq!(
+            mr_prompt(&mr),
+            "Review GitLab MR !184: Use remote shell profiles\nfix/remote-shell-profiles -> main\nhttps://gitlab/x/y/-/merge_requests/184\n\nReview remote profile detection."
+        );
+    }
+
+    #[test]
+    fn issue_branch_name_uses_date_number_and_slug() {
+        let issue = GitlabIssue {
+            iid: 1102,
+            title: "Detect agents remotely!".to_string(),
+            description: None,
+            web_url: None,
+        };
+
+        assert_eq!(
+            issue_branch_name(&issue, "0505", &[]),
+            "z-0505-1102-detect-agents-remotely"
+        );
+    }
+
+    #[test]
+    fn issue_branch_name_appends_collision_suffix() {
+        let issue = GitlabIssue {
+            iid: 1102,
+            title: "Detect agents remotely".to_string(),
+            description: None,
+            web_url: None,
+        };
+        let branches = vec![
+            "z-0505-1102-detect-agents-remotely".to_string(),
+            "z-0505-1102-detect-agents-remotely-2".to_string(),
+        ];
+
+        assert_eq!(
+            issue_branch_name(&issue, "0505", &branches),
+            "z-0505-1102-detect-agents-remotely-3"
+        );
+    }
+
+    #[test]
+    fn issue_branch_name_truncates_long_titles_before_collision_suffix() {
+        let issue = GitlabIssue {
+            iid: 1,
+            title: "a very long issue title that should not create a ridiculous branch name"
+                .to_string(),
+            description: None,
+            web_url: None,
+        };
+
+        let branches =
+            vec!["z-0505-1-a-very-long-issue-title-that-should-not-create-a-ridicu".to_string()];
+
+        let branch = issue_branch_name(&issue, "0505", &branches);
+
+        assert!(branch.len() <= 64, "branch was too long: {branch}");
+        assert!(branch.starts_with("z-0505-1-a-very-long-issue-title"));
+        assert!(branch.ends_with("-2"));
     }
 }

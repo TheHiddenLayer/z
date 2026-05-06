@@ -1,6 +1,8 @@
 use crate::agent::{Agent, AgentStatus};
-use crate::app::{App, Mode, MrSnapshot, PreviewMode};
-use crate::gitlab::{MergeRequest, MrDisplayKind, MrState, classify};
+use crate::app::{App, Mode, MrSnapshot, NewAgentSource, PreviewMode, RemoteList};
+use crate::gitlab::{
+    GitlabIssue, GitlabMergeRequest, MergeRequest, MrDisplayKind, MrState, classify,
+};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Rect},
@@ -14,6 +16,7 @@ use crate::style::{
 };
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
+const NEW_AGENT_LABEL_W: u16 = 14;
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::vertical([
@@ -59,7 +62,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Modal overlays
     match &app.mode {
         Mode::NewAgent { .. } => {
-            let modal_area = centered_rect(60, 70, frame.area());
+            let modal_area = centered_rect(60, 88, frame.area());
             frame.render_widget(Clear, modal_area);
             draw_new_agent_modal(frame, app, modal_area);
         }
@@ -513,6 +516,228 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
+fn source_label(source: NewAgentSource) -> &'static str {
+    match source {
+        NewAgentSource::Issue => "issue",
+        NewAgentSource::Mr => "mr",
+        NewAgentSource::Branch => "branch",
+    }
+}
+
+fn remote_status_line(message: &str, label_w: u16) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" ".repeat(label_w as usize)),
+        Span::styled(message.to_string(), Style::default().fg(DIM)),
+    ])
+}
+
+fn matches_source_query(label: &str, query: &str) -> bool {
+    let trimmed = query.trim();
+    trimmed.is_empty()
+        || label
+            .to_ascii_lowercase()
+            .contains(&trimmed.to_ascii_lowercase())
+}
+
+fn selectable_source_line(label: String, selected: bool, label_w: u16) -> Line<'static> {
+    let style = if selected {
+        Style::default().fg(TEXT)
+    } else {
+        Style::default().fg(DIM)
+    };
+    let indicator = if selected { "\u{2502} " } else { "  " };
+    Line::from(vec![
+        Span::raw(" ".repeat(label_w as usize)),
+        Span::styled(indicator, style),
+        Span::styled(label, style),
+    ])
+}
+
+fn issue_label(issue: &GitlabIssue) -> String {
+    format!("#{} {}", issue.iid, issue.title)
+}
+
+fn mr_label(mr: &GitlabMergeRequest) -> String {
+    format!("!{} {} {}", mr.iid, mr.title, mr.source_branch)
+}
+
+fn filtered_issue_indices(issues: &[GitlabIssue], query: &str) -> Vec<usize> {
+    issues
+        .iter()
+        .enumerate()
+        .filter_map(|(index, issue)| {
+            matches_source_query(&issue_label(issue), query).then_some(index)
+        })
+        .collect()
+}
+
+fn filtered_mr_indices(mrs: &[GitlabMergeRequest], query: &str) -> Vec<usize> {
+    mrs.iter()
+        .enumerate()
+        .filter_map(|(index, mr)| matches_source_query(&mr_label(mr), query).then_some(index))
+        .collect()
+}
+
+fn filtered_issue_lines(
+    issues: &RemoteList<GitlabIssue>,
+    query: &str,
+    selected_index: usize,
+    label_w: u16,
+) -> Vec<Line<'static>> {
+    match issues {
+        RemoteList::Idle | RemoteList::Loading => {
+            vec![remote_status_line("loading assigned issues...", label_w)]
+        }
+        RemoteList::Failed(message) => {
+            vec![remote_status_line(&format!("error: {message}"), label_w)]
+        }
+        RemoteList::Loaded(items) => {
+            let indices = filtered_issue_indices(items, query);
+            if indices.is_empty() {
+                let message = if items.is_empty() {
+                    "no assigned issues"
+                } else {
+                    "no matching issues"
+                };
+                return vec![remote_status_line(message, label_w)];
+            }
+            indices
+                .into_iter()
+                .map(|index| {
+                    selectable_source_line(
+                        issue_label(&items[index]),
+                        index == selected_index,
+                        label_w,
+                    )
+                })
+                .collect()
+        }
+    }
+}
+
+fn filtered_mr_lines(
+    mrs: &RemoteList<GitlabMergeRequest>,
+    query: &str,
+    selected_index: usize,
+    label_w: u16,
+) -> Vec<Line<'static>> {
+    match mrs {
+        RemoteList::Idle | RemoteList::Loading => {
+            vec![remote_status_line("loading review MRs...", label_w)]
+        }
+        RemoteList::Failed(message) => {
+            vec![remote_status_line(&format!("error: {message}"), label_w)]
+        }
+        RemoteList::Loaded(items) => {
+            let indices = filtered_mr_indices(items, query);
+            if indices.is_empty() {
+                let message = if items.is_empty() {
+                    "no MRs needing review"
+                } else {
+                    "no matching MRs"
+                };
+                return vec![remote_status_line(message, label_w)];
+            }
+            indices
+                .into_iter()
+                .map(|index| {
+                    selectable_source_line(
+                        mr_label(&items[index]),
+                        index == selected_index,
+                        label_w,
+                    )
+                })
+                .collect()
+        }
+    }
+}
+
+fn source_list_height(
+    source: NewAgentSource,
+    issues: &RemoteList<GitlabIssue>,
+    mrs: &RemoteList<GitlabMergeRequest>,
+    branches: &[String],
+    query: &str,
+) -> u16 {
+    let count = match source {
+        NewAgentSource::Issue => match issues {
+            RemoteList::Loaded(items) => filtered_issue_indices(items, query).len(),
+            _ => 1,
+        },
+        NewAgentSource::Mr => match mrs {
+            RemoteList::Loaded(items) => filtered_mr_indices(items, query).len(),
+            _ => 1,
+        },
+        NewAgentSource::Branch => branches.len(),
+    };
+    count.min(6).max(1) as u16
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NewAgentLayoutSizing {
+    top_padding: u16,
+    gap_after_source: u16,
+    gap_after_agent: u16,
+    gap_after_repo: u16,
+    gap_after_list: u16,
+    list_height: u16,
+    #[cfg(test)]
+    required_non_list_height: u16,
+}
+
+impl NewAgentLayoutSizing {
+    #[cfg(test)]
+    fn optional_spacer_height(self) -> u16 {
+        self.top_padding
+            + self.gap_after_source
+            + self.gap_after_agent
+            + self.gap_after_repo
+            + self.gap_after_list
+    }
+
+    #[cfg(test)]
+    fn total_height(self) -> u16 {
+        self.required_non_list_height + self.list_height + self.optional_spacer_height()
+    }
+
+    fn source_area_height(self, show_gitlab_source: bool) -> u16 {
+        self.list_height + u16::from(show_gitlab_source)
+    }
+}
+
+fn new_agent_layout_sizing(
+    inner_height: u16,
+    desired_list_height: u16,
+    show_gitlab_source: bool,
+    show_branch_toggle: bool,
+    show_name_row: bool,
+) -> NewAgentLayoutSizing {
+    let required_non_list_height = 8
+        + u16::from(show_gitlab_source)
+        + u16::from(show_branch_toggle)
+        + u16::from(show_name_row);
+    let available_for_list = inner_height.saturating_sub(required_non_list_height).max(1);
+    let list_height = desired_list_height.clamp(1, 6).min(available_for_list);
+    let mut optional_space = inner_height.saturating_sub(required_non_list_height + list_height);
+
+    let mut take_spacer = || {
+        let row = u16::from(optional_space > 0);
+        optional_space = optional_space.saturating_sub(row);
+        row
+    };
+
+    NewAgentLayoutSizing {
+        top_padding: take_spacer(),
+        gap_after_source: take_spacer(),
+        gap_after_agent: take_spacer(),
+        gap_after_repo: take_spacer(),
+        gap_after_list: take_spacer(),
+        list_height,
+        #[cfg(test)]
+        required_non_list_height,
+    }
+}
+
 fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
     use crate::app::{BranchMode, NewAgentFocus};
 
@@ -525,8 +750,16 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     let Mode::NewAgent {
         repo_index,
+        source,
+        source_query,
+        source_index,
+        issues,
+        mrs,
+        selected_issue: _,
+        selected_mr: _,
         branch_mode,
         prompt,
+        prompt_mode: _,
         focus,
         base_index,
         branches,
@@ -550,28 +783,43 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         BranchMode::New => branches,
         BranchMode::Existing => existing_branches,
     };
-    let list_height = active_list.len().clamp(1, 6) as u16;
-
-    let show_name = matches!(branch_mode, BranchMode::New);
-    let name_rows = if show_name { 2 } else { 0 }; // row + gap
+    let label_w = NEW_AGENT_LABEL_W;
+    let desired_list_height = source_list_height(*source, issues, mrs, active_list, source_query);
+    let show_gitlab_source = matches!(source, NewAgentSource::Issue | NewAgentSource::Mr);
+    let show_branch_controls = matches!(source, NewAgentSource::Branch | NewAgentSource::Issue);
+    let show_branch_toggle = matches!(source, NewAgentSource::Branch);
+    let show_name = show_branch_controls
+        && matches!(branch_mode, BranchMode::New)
+        && !matches!(source, NewAgentSource::Issue);
+    let show_issue_name = matches!(source, NewAgentSource::Issue);
+    let show_name_row = show_name || show_issue_name;
+    let name_rows = u16::from(show_name_row);
+    let sizing = new_agent_layout_sizing(
+        inner.height,
+        desired_list_height,
+        show_gitlab_source,
+        show_branch_toggle,
+        show_name_row,
+    );
 
     let chunks = Layout::vertical([
-        Constraint::Length(1),           // top padding
-        Constraint::Length(1),           // Agent row
-        Constraint::Length(1),           // gap
-        Constraint::Length(1),           // Repo row
-        Constraint::Length(1),           // gap
-        Constraint::Length(1),           // Branch toggle row
-        Constraint::Length(list_height), // Branch list
-        Constraint::Length(1),           // gap
-        Constraint::Length(name_rows),   // Name row (0 if Existing)
-        Constraint::Length(1),           // Prompt label
-        Constraint::Min(3),              // Prompt area
-        Constraint::Length(1),           // hint bar
+        Constraint::Length(sizing.top_padding),
+        Constraint::Length(1), // Start from row
+        Constraint::Length(sizing.gap_after_source),
+        Constraint::Length(1), // Agent row
+        Constraint::Length(sizing.gap_after_agent),
+        Constraint::Length(1), // Repo row
+        Constraint::Length(sizing.gap_after_repo),
+        Constraint::Length(if show_branch_toggle { 1 } else { 0 }),
+        Constraint::Length(sizing.source_area_height(show_gitlab_source)),
+        Constraint::Length(sizing.gap_after_list),
+        Constraint::Length(name_rows), // Name row
+        Constraint::Length(1),         // Prompt label
+        Constraint::Min(3),            // Prompt area
+        Constraint::Length(1),         // hint bar
     ])
     .split(inner);
 
-    let label_w = 14u16;
     let label_style = |focused: bool| {
         if focused {
             Style::default().fg(TEXT)
@@ -616,68 +864,114 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
         ])
     };
 
+    // --- Source row ---
+    let is_source = matches!(focus, NewAgentFocus::Source);
+    let source_line = picker_row("Start from", source_label(*source), is_source);
+    frame.render_widget(Paragraph::new(source_line), chunks[1]);
+
     // --- Agent row ---
     let is_agent = matches!(focus, NewAgentFocus::Agent);
     let agent_line = picker_row("Agent", agent_name.as_str(), is_agent);
-    frame.render_widget(Paragraph::new(agent_line), chunks[1]);
+    frame.render_widget(Paragraph::new(agent_line), chunks[3]);
 
     // --- Repo row ---
     let is_repo = matches!(focus, NewAgentFocus::Repo);
     let repo_line = picker_row("Repo", repo_name, is_repo);
-    frame.render_widget(Paragraph::new(repo_line), chunks[3]);
+    frame.render_widget(Paragraph::new(repo_line), chunks[5]);
 
     // --- Branch toggle row ---
-    let is_toggle = matches!(focus, NewAgentFocus::BranchToggle);
-    let mode_label = match branch_mode {
-        BranchMode::New => "New",
-        BranchMode::Existing => "Existing",
-    };
-    let toggle_line = picker_row("Branch", mode_label, is_toggle);
-    frame.render_widget(Paragraph::new(toggle_line), chunks[5]);
-
-    // --- Branch list ---
-    let list_area = chunks[6];
-    if active_list.is_empty() {
-        let empty_msg = match branch_mode {
-            BranchMode::New => "loading...",
-            BranchMode::Existing => "no existing branches",
+    if show_branch_toggle {
+        let is_toggle = matches!(focus, NewAgentFocus::BranchToggle);
+        let mode_label = match branch_mode {
+            BranchMode::New => "New",
+            BranchMode::Existing => "Existing",
         };
-        let line = Line::from(vec![
-            Span::raw(" ".repeat(label_w as usize)),
-            Span::styled(empty_msg, Style::default().fg(DIM)),
-        ]);
-        frame.render_widget(Paragraph::new(line), list_area);
-    } else {
-        let visible = list_area.height as usize;
-        let scroll = if *base_index >= visible {
-            base_index - visible + 1
-        } else {
-            0
-        };
-        let lines: Vec<Line> = active_list
-            .iter()
-            .enumerate()
-            .skip(scroll)
-            .take(visible)
-            .map(|(i, b)| {
-                let selected = i == *base_index;
-                let indicator = if selected { "\u{2502} " } else { "  " };
-                let style = if selected {
-                    Style::default().fg(TEXT)
-                } else {
-                    Style::default().fg(DIM)
-                };
-                Line::from(vec![
-                    Span::raw(" ".repeat(label_w as usize)),
-                    Span::styled(indicator, style),
-                    Span::styled(b.as_str(), style),
-                ])
-            })
-            .collect();
-        frame.render_widget(Paragraph::new(lines), list_area);
+        let toggle_line = picker_row("Branch", mode_label, is_toggle);
+        frame.render_widget(Paragraph::new(toggle_line), chunks[7]);
     }
 
-    // --- Name row (only in New mode) ---
+    // --- Source or branch list ---
+    let list_slot = chunks[8];
+    if show_gitlab_source {
+        let source_chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(sizing.list_height),
+        ])
+        .split(list_slot);
+
+        let is_search = matches!(focus, NewAgentFocus::Search);
+        let search_value = if source_query.is_empty() {
+            match source {
+                NewAgentSource::Issue => "filter issues...",
+                NewAgentSource::Mr => "filter MRs...",
+                NewAgentSource::Branch => "",
+            }
+        } else {
+            source_query.as_str()
+        };
+        let search_line = picker_row("Search", search_value, is_search);
+        frame.render_widget(Paragraph::new(search_line), source_chunks[0]);
+
+        let list_area = source_chunks[1];
+        let all_lines = match source {
+            NewAgentSource::Issue => {
+                filtered_issue_lines(issues, source_query, *source_index, label_w)
+            }
+            NewAgentSource::Mr => filtered_mr_lines(mrs, source_query, *source_index, label_w),
+            NewAgentSource::Branch => Vec::new(),
+        };
+        let visible = list_area.height as usize;
+        let selected_pos = match source {
+            NewAgentSource::Issue => match issues {
+                RemoteList::Loaded(items) => filtered_issue_indices(items, source_query)
+                    .into_iter()
+                    .position(|index| index == *source_index),
+                _ => None,
+            },
+            NewAgentSource::Mr => match mrs {
+                RemoteList::Loaded(items) => filtered_mr_indices(items, source_query)
+                    .into_iter()
+                    .position(|index| index == *source_index),
+                _ => None,
+            },
+            NewAgentSource::Branch => None,
+        };
+        let scroll = selected_pos
+            .filter(|_| visible > 0)
+            .map(|pos| if pos >= visible { pos - visible + 1 } else { 0 })
+            .unwrap_or(0);
+        let lines: Vec<Line> = all_lines.into_iter().skip(scroll).take(visible).collect();
+        frame.render_widget(Paragraph::new(lines), list_area);
+    } else {
+        let list_area = list_slot;
+        if active_list.is_empty() {
+            let empty_msg = match branch_mode {
+                BranchMode::New => "loading...",
+                BranchMode::Existing => "no existing branches",
+            };
+            frame.render_widget(
+                Paragraph::new(remote_status_line(empty_msg, label_w)),
+                list_area,
+            );
+        } else {
+            let visible = list_area.height as usize;
+            let scroll = if visible > 0 && *base_index >= visible {
+                base_index - visible + 1
+            } else {
+                0
+            };
+            let lines: Vec<Line> = active_list
+                .iter()
+                .enumerate()
+                .skip(scroll)
+                .take(visible)
+                .map(|(i, b)| selectable_source_line(b.clone(), i == *base_index, label_w))
+                .collect();
+            frame.render_widget(Paragraph::new(lines), list_area);
+        }
+    }
+
+    // --- Name row ---
     if show_name {
         let is_name = matches!(focus, NewAgentFocus::Name);
         let name_display = if is_name && *name_pristine {
@@ -696,16 +990,23 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
             name_display,
         ]);
-        frame.render_widget(Paragraph::new(name_line), chunks[8]);
+        frame.render_widget(Paragraph::new(name_line), chunks[10]);
+    } else if show_issue_name {
+        let name_line = Line::from(vec![
+            Span::styled("  Name", Style::default().fg(DIM)),
+            Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
+            Span::styled(branch_name.as_str(), Style::default().fg(DIM)),
+        ]);
+        frame.render_widget(Paragraph::new(name_line), chunks[10]);
     }
 
     // --- Prompt label ---
     let is_prompt = matches!(focus, NewAgentFocus::Prompt);
     let prompt_label = Line::from(Span::styled("  Prompt", label_style(is_prompt)));
-    frame.render_widget(Paragraph::new(prompt_label), chunks[9]);
+    frame.render_widget(Paragraph::new(prompt_label), chunks[11]);
 
     // --- Prompt area ---
-    let prompt_area = chunks[10];
+    let prompt_area = chunks[12];
     if prompt.is_empty() {
         let placeholder = if is_prompt {
             Line::from(vec![
@@ -743,31 +1044,33 @@ fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     // --- Hint bar ---
     let hint_line = match focus {
-        NewAgentFocus::Agent | NewAgentFocus::Repo | NewAgentFocus::BranchToggle => {
+        NewAgentFocus::Source
+        | NewAgentFocus::Agent
+        | NewAgentFocus::Repo
+        | NewAgentFocus::BranchToggle => {
             footer_hint(&[("←/→", "cycle"), ("tab", "next"), ("q/esc", "cancel")])
         }
-        NewAgentFocus::BranchList => footer_hint(&[
+        NewAgentFocus::Search => {
+            footer_hint(&[("type", "filter"), ("tab", "list"), ("esc", "cancel")])
+        }
+        NewAgentFocus::SourceList | NewAgentFocus::BranchList => footer_hint(&[
             ("↑/k", "up"),
             ("↓/j", "down"),
+            ("enter", "start"),
             ("tab", "next"),
-            ("q/esc", "cancel"),
         ]),
-        NewAgentFocus::Name => {
-            footer_hint(&[("tab", "next"), ("esc", "cancel")]) // q types literally here
-        }
-        NewAgentFocus::Prompt => {
-            footer_hint(&[
-                ("enter", "start"),
-                ("alt+enter", "newline"),
-                ("tab", "options"),
-                ("esc", "cancel"), // q types literally here
-            ])
-        }
+        NewAgentFocus::Name => footer_hint(&[("tab", "next"), ("esc", "cancel")]),
+        NewAgentFocus::Prompt => footer_hint(&[
+            ("enter", "start"),
+            ("alt+enter", "newline"),
+            ("ctrl+r", "reset"),
+            ("esc", "cancel"),
+        ]),
     };
     // Indent the hint line under the form's value column for visual continuity.
     let mut spans = vec![Span::raw(" ".repeat(label_w as usize))];
     spans.extend(hint_line.spans);
-    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[11]);
+    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[13]);
 }
 
 fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
@@ -894,198 +1197,123 @@ fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{MrKey, MrSnapshot};
-    use crate::gitlab::{MergeRequest, MrState};
-    use ratatui::{Terminal, backend::TestBackend};
+    use crate::app::{NewAgentSource, RemoteList};
+    use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
 
-    #[test]
-    fn mr_preview_missing_prompts_creation() {
-        let lines = mr_preview_lines(Some(&MrSnapshot::Missing));
-
-        assert_eq!(lines[0].spans[0].content, "No merge request.");
-        assert_eq!(lines[1].spans[0].content, "m create MR");
-    }
-
-    #[test]
-    fn mr_preview_ready_renders_compact_details() {
-        let mr = test_mr();
-        let lines = mr_preview_lines(Some(&MrSnapshot::Ready(mr)));
-
-        assert!(
-            lines
-                .iter()
-                .any(|line| { line.spans.iter().any(|span| span.content.contains("!42")) })
-        );
-        assert!(lines.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|span| span.content.contains("feature/auth"))
-        }));
-    }
-
-    #[test]
-    fn mr_status_hints_ready_mr_include_merge() {
-        let mr = test_mr();
-        let line = mr_status_hints(Some(&MrSnapshot::Ready(mr)));
-
-        assert_eq!(
-            hint_text(&line),
-            "m MR · M merge · o open · r rebase · tab preview"
-        );
-    }
-
-    #[test]
-    fn mr_status_hints_blocked_draft_open_mr_include_intents() {
-        let mut mr = test_mr();
-        mr.merge_state = Some("cannot_be_merged".into());
-        let line = mr_status_hints(Some(&MrSnapshot::Ready(mr)));
-
-        assert_eq!(
-            hint_text(&line),
-            "f make-ready · r rebase · v review-fix · o open · tab preview"
-        );
-    }
-
-    #[test]
-    fn mr_status_hints_other_ready_snapshot_kind_is_basic_mr_actions() {
-        let mut mr = test_mr();
-        mr.state = MrState::Merged;
-        let line = mr_status_hints(Some(&MrSnapshot::Ready(mr)));
-
-        assert_eq!(hint_text(&line), "m MR · o open · tab preview");
-    }
-
-    #[test]
-    fn mr_status_hints_error_can_retry() {
-        let snapshot = MrSnapshot::Error("boom".into());
-        let line = mr_status_hints(Some(&snapshot));
-
-        assert_eq!(hint_text(&line), "m retry · tab preview");
-    }
-
-    #[test]
-    fn mr_status_hints_missing_none_can_create() {
-        assert_eq!(
-            hint_text(&mr_status_hints(None)),
-            "m create MR · tab preview · ? help"
-        );
-        assert_eq!(
-            hint_text(&mr_status_hints(Some(&MrSnapshot::Missing))),
-            "m create MR · tab preview · ? help"
-        );
-    }
-
-    #[test]
-    fn merge_modal_renders_captured_confirmation_details() {
-        let config = crate::config::Config::from_toml_str(r#"repos = []"#).unwrap();
-        let mut app = App::new(config);
-        app.mode = Mode::ConfirmMerge {
-            key: MrKey::new("/tmp/repo".into(), "fix-auth".into()),
-            id_or_branch: "1".into(),
-            title: "Captured MR".into(),
-        };
-
-        let backend = TestBackend::new(64, 12);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| draw_merge_modal(frame, &app, frame.area()))
-            .unwrap();
-        let text = buffer_text(terminal.backend().buffer());
-
-        assert!(text.contains("!1"));
-        assert!(text.contains("Captured MR"));
-    }
-
-    #[test]
-    fn mr_column_uses_plain_full_status_labels() {
-        assert_eq!(mr_status_label(MrDisplayKind::None), "");
-        assert_eq!(mr_status_label(MrDisplayKind::Draft), "draft");
-        assert_eq!(mr_status_label(MrDisplayKind::Ready), "ready");
-        assert_eq!(mr_status_label(MrDisplayKind::Blocked), "blocked");
-        assert_eq!(mr_status_label(MrDisplayKind::Open), "open");
-        assert_eq!(mr_status_label(MrDisplayKind::Merged), "merged");
-        assert_eq!(mr_status_label(MrDisplayKind::Unknown), "unknown");
-
-        let config = crate::config::Config::from_toml_str(r#"repos = []"#).unwrap();
-        let mut app = App::new(config);
-        let agent = test_agent("feature/auth");
-        let key = MrKey::new(agent.repo_path.clone(), agent.branch.clone());
-        app.mr_snapshots.insert(key, MrSnapshot::Ready(test_mr()));
-
-        let span = mr_status(&app, &agent, Style::default().fg(TEXT));
-
-        assert_eq!(span.content, "ready");
-        assert_eq!(span.style, Style::default().fg(TEXT));
-    }
-
-    #[test]
-    fn mr_column_shows_unknown_for_error_snapshot() {
-        let config = crate::config::Config::from_toml_str(r#"repos = []"#).unwrap();
-        let mut app = App::new(config);
-        let agent = test_agent("feature/auth");
-        let key = MrKey::new(agent.repo_path.clone(), agent.branch.clone());
-        app.mr_snapshots
-            .insert(key, MrSnapshot::Error("glab failed".into()));
-
-        let span = mr_status(&app, &agent, Style::default().fg(TEXT));
-
-        assert_eq!(span.content, "unknown");
-        assert_eq!(span.style, Style::default().fg(TEXT));
-    }
-
-    fn hint_text(line: &Line<'static>) -> String {
+    fn line_text(line: &Line<'_>) -> String {
         line.spans
             .iter()
             .map(|span| span.content.as_ref())
-            .collect::<String>()
+            .collect()
     }
 
-    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
-        let area = buffer.area;
-        let mut text = String::new();
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                if let Some(cell) = buffer.cell((x, y)) {
-                    text.push_str(cell.symbol());
-                }
-            }
-            text.push('\n');
-        }
-        text
-    }
-
-    fn test_mr() -> MergeRequest {
-        MergeRequest {
-            source_branch: "feature/auth".into(),
-            target_branch: Some("main".into()),
-            iid: Some(42),
-            title: Some("Fix auth".into()),
-            url: Some("https://gitlab.example.com/g/r/-/merge_requests/42".into()),
-            state: MrState::Open,
-            draft: Some(false),
-            merge_state: Some("mergeable".into()),
-            pipeline_state: Some("success".into()),
-            unresolved_count: Some(0),
+    fn issue(iid: u64, title: &str) -> GitlabIssue {
+        GitlabIssue {
+            iid,
+            title: title.to_string(),
+            description: None,
+            web_url: None,
         }
     }
 
-    fn test_agent(branch: &str) -> Agent {
-        Agent {
-            repo_path: "/tmp/repo".into(),
-            repo_name: "repo".into(),
-            branch: branch.into(),
-            base_branch: Some("main".into()),
-            worktree_path: format!("/tmp/repo-worktrees/{branch}").into(),
-            slug: branch.replace('/', "-"),
-            session_name: format!("z-repo-{}", branch.replace('/', "-")),
-            status: AgentStatus::Running,
-            agent_name: "codex".into(),
-            last_pane_hash: None,
-            last_attached_count: None,
-            quiet_captures: 0,
-            seen_activity_since_seed: false,
-            was_spinner_visible: false,
-            consecutive_emits: 0,
+    fn mr(iid: u64, title: &str, source_branch: &str) -> GitlabMergeRequest {
+        GitlabMergeRequest {
+            iid,
+            title: title.to_string(),
+            description: None,
+            web_url: None,
+            source_branch: source_branch.to_string(),
+            target_branch: None,
         }
+    }
+
+    #[test]
+    fn source_label_returns_lowercase_gitlab_source_names() {
+        assert_eq!(source_label(NewAgentSource::Issue), "issue");
+        assert_eq!(source_label(NewAgentSource::Mr), "mr");
+        assert_eq!(source_label(NewAgentSource::Branch), "branch");
+    }
+
+    #[test]
+    fn filtered_issue_lines_render_number_title_and_selection() {
+        let issues = RemoteList::Loaded(vec![
+            issue(123, "Fix agent startup"),
+            issue(456, "Document setup"),
+        ]);
+
+        let lines = filtered_issue_lines(&issues, "agent", 0, 4);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(line_text(&lines[0]), "    \u{2502} #123 Fix agent startup");
+    }
+
+    #[test]
+    fn filtered_issue_lines_distinguish_empty_from_no_matches() {
+        let empty = filtered_issue_lines(&RemoteList::Loaded(vec![]), "", 0, 2);
+        assert_eq!(line_text(&empty[0]), "  no assigned issues");
+
+        let issues = RemoteList::Loaded(vec![issue(123, "Fix agent startup")]);
+        let no_match = filtered_issue_lines(&issues, "billing", 0, 2);
+        assert_eq!(line_text(&no_match[0]), "  no matching issues");
+    }
+
+    #[test]
+    fn filtered_mr_lines_include_source_branch() {
+        let mrs = RemoteList::Loaded(vec![
+            mr(7, "Review renderer", "feature/render"),
+            mr(8, "Update docs", "docs/readme"),
+        ]);
+
+        let lines = filtered_mr_lines(&mrs, "render", 0, 2);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            line_text(&lines[0]),
+            "  \u{2502} !7 Review renderer feature/render"
+        );
+    }
+
+    #[test]
+    fn filtered_mr_lines_distinguish_empty_from_no_matches() {
+        let empty = filtered_mr_lines(&RemoteList::Loaded(vec![]), "", 0, 2);
+        assert_eq!(line_text(&empty[0]), "  no MRs needing review");
+
+        let mrs = RemoteList::Loaded(vec![mr(7, "Review renderer", "feature/render")]);
+        let no_match = filtered_mr_lines(&mrs, "billing", 0, 2);
+        assert_eq!(line_text(&no_match[0]), "  no matching MRs");
+    }
+
+    #[test]
+    fn remote_status_line_is_indented() {
+        let line = remote_status_line("loading assigned issues...", 3);
+
+        assert_eq!(line_text(&line), "   loading assigned issues...");
+    }
+
+    #[test]
+    fn layout_sizing_caps_list_to_one_when_inner_height_is_tight() {
+        let sizing = new_agent_layout_sizing(11, 6, true, false, true);
+
+        assert_eq!(sizing.list_height, 1);
+        assert_eq!(sizing.total_height(), 11);
+        assert_eq!(sizing.optional_spacer_height(), 0);
+    }
+
+    #[test]
+    fn layout_sizing_preserves_required_rows_at_minimum_supported_height() {
+        let sizing = new_agent_layout_sizing(12, 6, true, true, true);
+
+        assert_eq!(sizing.list_height, 1);
+        assert_eq!(sizing.total_height(), 12);
+        assert_eq!(sizing.optional_spacer_height(), 0);
+    }
+
+    #[test]
+    fn layout_sizing_allows_six_list_rows_when_height_is_available() {
+        let sizing = new_agent_layout_sizing(21, 6, true, false, true);
+
+        assert_eq!(sizing.list_height, 6);
+        assert_eq!(sizing.total_height(), 21);
+        assert_eq!(sizing.optional_spacer_height(), 5);
     }
 }
