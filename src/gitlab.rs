@@ -28,7 +28,7 @@ pub struct MergeRequest {
     pub unresolved_count: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MrDisplayKind {
     None,
     Unknown,
