@@ -369,6 +369,34 @@ pub async fn list_sessions() -> Vec<TmuxSession> {
     }
 }
 
+pub fn gitlab_mr_refspec(iid: u64, branch: &str) -> String {
+    format!("merge-requests/{iid}/head:{branch}")
+}
+
+pub async fn prepare_gitlab_mr_branch(
+    repo_path: &Path,
+    iid: u64,
+    branch: &str,
+) -> Result<(), String> {
+    let refspec = gitlab_mr_refspec(iid, branch);
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["fetch", "origin", &refspec])
+        .output()
+        .await
+        .map_err(|e| format!("git failed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "git fetch MR branch failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(())
+}
+
 pub async fn create_worktree(
     repo_path: &Path,
     branch: &str,
@@ -777,6 +805,192 @@ pub(crate) mod tests {
     fn agent_status_running_has_session() {
         let status = AgentStatus::Running;
         assert!(status.has_session());
+    }
+
+    #[test]
+    fn gitlab_mr_refspec_fetches_head_into_source_branch() {
+        assert_eq!(
+            gitlab_mr_refspec(184, "fix/remote-shell-profiles"),
+            "merge-requests/184/head:fix/remote-shell-profiles"
+        );
+    }
+
+    #[test]
+    fn gitlab_mr_refspec_preserves_slashes() {
+        assert_eq!(
+            gitlab_mr_refspec(7, "jona/gen-1102-detect-agents"),
+            "merge-requests/7/head:jona/gen-1102-detect-agents"
+        );
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("z-agent-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} in {cwd:?} failed to start: {e}"))
+    }
+
+    fn assert_git(cwd: &Path, args: &[&str]) {
+        let output = run_git(cwd, args);
+        assert!(
+            output.status.success(),
+            "git {args:?} in {cwd:?} failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+        let output = run_git(cwd, args);
+        assert!(
+            output.status.success(),
+            "git {args:?} in {cwd:?} failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn write_commit(repo: &Path, contents: &str, message: &str) -> String {
+        std::fs::write(repo.join("file.txt"), contents).unwrap();
+        assert_git(repo, &["add", "file.txt"]);
+        assert_git(repo, &["commit", "-q", "-m", message]);
+        git_stdout(repo, &["rev-parse", "HEAD"])
+    }
+
+    fn setup_gitlab_mr_repo(
+        name: &str,
+        iid: u64,
+        branch: &str,
+    ) -> (PathBuf, PathBuf, String, String) {
+        let tmp = unique_temp_dir(name);
+        let origin = tmp.join("origin.git");
+        let seed = tmp.join("seed");
+        let repo = tmp.join("repo");
+
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&seed).unwrap();
+
+        assert_git(&origin, &["init", "-q", "--bare"]);
+        assert_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+        assert_git(&seed, &["init", "-q", "-b", "main"]);
+        assert_git(&seed, &["config", "user.email", "redacted"]);
+        assert_git(&seed, &["config", "user.name", "Z Test"]);
+        write_commit(&seed, "base\n", "base");
+        assert_git(
+            &seed,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        assert_git(&seed, &["push", "-q", "origin", "main"]);
+
+        assert_git(&seed, &["checkout", "-q", "-b", branch]);
+        let stale_sha = write_commit(&seed, "stale\n", "stale");
+        assert_git(&seed, &["push", "-q", "origin", branch]);
+        let mr_sha = write_commit(&seed, "mr head\n", "mr head");
+        let mr_push_ref = format!("HEAD:refs/merge-requests/{iid}/head");
+        assert_git(&seed, &["push", "-q", "origin", &mr_push_ref]);
+
+        let output = std::process::Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git clone failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        (tmp, repo, stale_sha, mr_sha)
+    }
+
+    #[tokio::test]
+    async fn prepare_gitlab_mr_branch_fetches_missing_local_branch() {
+        let (tmp, repo, _, mr_sha) = setup_gitlab_mr_repo("missing-branch", 184, "fix/mr-head");
+
+        prepare_gitlab_mr_branch(&repo, 184, "fix/mr-head")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "refs/heads/fix/mr-head"]),
+            mr_sha
+        );
+        assert_eq!(git_stdout(&repo, &["branch", "--show-current"]), "main");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn prepare_gitlab_mr_branch_updates_stale_existing_local_branch() {
+        let (tmp, repo, stale_sha, mr_sha) =
+            setup_gitlab_mr_repo("stale-branch", 185, "fix/stale-mr");
+        assert_git(&repo, &["branch", "fix/stale-mr", &stale_sha]);
+
+        prepare_gitlab_mr_branch(&repo, 185, "fix/stale-mr")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "refs/heads/fix/stale-mr"]),
+            mr_sha
+        );
+        assert_eq!(git_stdout(&repo, &["branch", "--show-current"]), "main");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn prepare_gitlab_mr_branch_fetches_branch_names_with_slashes() {
+        let (tmp, repo, _, mr_sha) =
+            setup_gitlab_mr_repo("slash-branch", 186, "jona/gen-1102-detect-agents");
+
+        prepare_gitlab_mr_branch(&repo, 186, "jona/gen-1102-detect-agents")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            git_stdout(
+                &repo,
+                &["rev-parse", "refs/heads/jona/gen-1102-detect-agents"]
+            ),
+            mr_sha
+        );
+        assert_eq!(git_stdout(&repo, &["branch", "--show-current"]), "main");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn prepare_gitlab_mr_branch_reports_fetch_failure() {
+        let (tmp, repo, _, _) = setup_gitlab_mr_repo("fetch-failure", 187, "fix/available");
+
+        let error = prepare_gitlab_mr_branch(&repo, 999, "fix/missing")
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.contains("git fetch MR branch failed"),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // --- Worktree parsing (from git.rs) ---
