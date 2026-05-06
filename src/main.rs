@@ -1,4 +1,5 @@
 mod agent;
+mod agent_table;
 mod app;
 mod config;
 mod gitlab;
@@ -231,6 +232,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         execute(cmd, &action_tx);
     }
 
+    install_panic_hook();
+
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableFocusChange)?;
@@ -295,15 +298,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Clean shutdown
     events.stop();
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableFocusChange,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
+    restore_terminal()?;
 
     Ok(())
+}
+
+/// Restore terminal to a sane state. Safe to call from a panic hook because
+/// it only touches stdout; doesn't depend on the `Terminal` instance.
+fn restore_terminal() -> std::io::Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        std::io::stdout(),
+        DisableFocusChange,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show,
+    )?;
+    Ok(())
+}
+
+/// Restore terminal before delegating to the original panic hook so panic
+/// output isn't swallowed by raw mode / the alternate screen.
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = restore_terminal();
+        original(info);
+    }));
 }
 
 /// Route a command. Attach is the only command that runs synchronously in

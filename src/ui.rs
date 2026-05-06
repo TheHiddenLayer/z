@@ -1,4 +1,4 @@
-use crate::agent::{Agent, AgentStatus};
+use crate::agent_table::AgentTableWidget;
 use crate::app::{App, Mode, MrSnapshot, NewAgentSource, PreviewMode, RemoteList};
 use crate::gitlab::{
     GitlabIssue, GitlabMergeRequest, MergeRequest, MrDisplayKind, MrState, classify,
@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::style::{
@@ -77,49 +77,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         _ => {}
     }
-}
-
-const SPINNER_FRAMES: [&str; 10] = [
-    "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}",
-    "\u{2807}", "\u{280F}",
-];
-
-fn status_glyph(agent: &Agent, frame_idx: usize, _base: Style) -> Span<'static> {
-    // The status glyph carries its own semantics — yellow spinner = working,
-    // green ✓ = quiet/done, red ✗ = failed, dim − = stopped. The spinner→✓
-    // transition is a color change as well as a glyph change so the moment
-    // an agent finishes pops in peripheral vision.
-    let style = Style::default().fg(status_color(agent));
-    match &agent.status {
-        AgentStatus::Error(_) => Span::styled("\u{2717}", style),
-        AgentStatus::Stopped => Span::styled("\u{2212}", style),
-        _ if agent.shows_spinner() => {
-            let g = SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()];
-            Span::styled(g, style)
-        }
-        _ => Span::styled("\u{2713}", style),
-    }
-}
-
-fn mr_status_label(kind: MrDisplayKind) -> &'static str {
-    match kind {
-        MrDisplayKind::None => "",
-        MrDisplayKind::Unknown => "unknown",
-        MrDisplayKind::Draft => "draft",
-        MrDisplayKind::Ready => "ready",
-        MrDisplayKind::Blocked => "blocked",
-        MrDisplayKind::Open => "open",
-        MrDisplayKind::Merged => "merged",
-    }
-}
-
-fn mr_status(app: &App, agent: &Agent, style: Style) -> Span<'static> {
-    let kind = match app.mr_snapshot_for_agent(agent) {
-        Some(MrSnapshot::Ready(mr)) => classify(Some(mr)).kind,
-        Some(MrSnapshot::Error(_)) => MrDisplayKind::Unknown,
-        None | Some(MrSnapshot::Missing) => MrDisplayKind::None,
-    };
-    Span::styled(mr_status_label(kind), style)
 }
 
 fn mr_preview_lines(snapshot: Option<&MrSnapshot>) -> Vec<Line<'static>> {
@@ -240,145 +197,28 @@ fn mr_status_hints(snapshot: Option<&MrSnapshot>) -> Line<'static> {
 }
 
 fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
-    if app.agents.is_empty() {
-        let repos = app.config.resolved_repos();
-        let msg = if repos.is_empty() {
-            "No repos configured. Add repos to ~/.config/z/config.toml"
-        } else {
-            "No agents yet."
-        };
-        let line = Line::from(Span::styled(msg, Style::default().fg(DIM)));
-        frame.render_widget(Paragraph::new(line), area);
-        return;
-    }
-
-    let visible_rows = (area.height as usize).saturating_sub(2);
-
-    let offset = if visible_rows == 0 {
-        0
-    } else if app.selected >= visible_rows {
-        app.selected - visible_rows + 1
-    } else {
-        0
-    };
-
-    let repo_w = app
+    let mr_kinds: Vec<MrDisplayKind> = app
         .agents
         .iter()
-        .map(|a| a.repo_name.len())
-        .max()
-        .unwrap_or(0)
-        .max(4) as u16;
-    // Branch column may show "<slug> \u{2192} <branch>" when drifted; size for that.
-    let branch_w = app
-        .agents
-        .iter()
-        .map(|a| {
-            if a.slug != a.branch.replace('/', "-") {
-                a.slug.len() + 3 + a.branch.len()
-            } else {
-                a.branch.len()
-            }
+        .map(|agent| match app.mr_snapshot_for_agent(agent) {
+            Some(MrSnapshot::Ready(mr)) => classify(Some(mr)).kind,
+            Some(MrSnapshot::Error(_)) => MrDisplayKind::Unknown,
+            None | Some(MrSnapshot::Missing) => MrDisplayKind::None,
         })
-        .max()
-        .unwrap_or(0)
-        .max(6) as u16;
-    let has_base = app
-        .agents
-        .iter()
-        .any(|a| a.base_branch.as_deref().is_some_and(|b| !b.is_empty()));
-    let base_col_w = if has_base {
-        app.agents
-            .iter()
-            .map(|a| a.base_branch.as_deref().unwrap_or("").len())
-            .max()
-            .unwrap_or(0)
-            .max(4) as u16
+        .collect();
+
+    let empty_message = if app.config.resolved_repos().is_empty() {
+        "No repos configured. Add repos to ~/.config/z/config.toml"
     } else {
-        0
+        "No agents yet."
     };
-    let status_w: u16 = 1;
-    let mr_w: u16 = 7;
 
-    let mut rows: Vec<Row> = Vec::new();
-
-    for (i, agent) in app
-        .agents
-        .iter()
-        .enumerate()
-        .skip(offset)
-        .take(visible_rows)
-    {
-        let is_selected = i == app.selected;
-
-        let indicator = if is_selected { "\u{2502}" } else { " " };
-        let indicator_style = if is_selected {
-            Style::default().fg(TEXT)
-        } else {
-            Style::default()
-        };
-
-        let text_style = if is_selected {
-            Style::default().fg(TEXT)
-        } else {
-            Style::default().fg(DIM)
-        };
-
-        let base_cell = match agent.base_branch.as_deref() {
-            Some(b) if !b.is_empty() => Line::from(Span::styled(b, text_style)),
-            _ => Line::from(""),
-        };
-
-        let drifted = agent.slug != agent.branch.replace('/', "-");
-        let branch_cell = if drifted {
-            Line::from(vec![
-                Span::styled(agent.slug.as_str(), text_style),
-                drift_arrow(),
-                Span::styled(
-                    agent.branch.as_str(),
-                    text_style.add_modifier(Modifier::ITALIC),
-                ),
-            ])
-        } else {
-            Line::from(Span::styled(agent.branch.as_str(), text_style))
-        };
-
-        rows.push(Row::new(vec![
-            Cell::from(Span::styled(indicator, indicator_style)),
-            Cell::from(status_glyph(agent, app.spinner_frame, text_style)),
-            Cell::from(mr_status(app, agent, text_style)),
-            Cell::from(branch_cell),
-            Cell::from(base_cell),
-            Cell::from(Span::styled(agent.repo_name.as_str(), text_style)),
-        ]));
-    }
-
-    let hdr_style = Style::default().fg(DIM);
-    let header = Row::new(vec![
-        Cell::from(""),
-        Cell::from(""),
-        Cell::from(Span::styled("MR", hdr_style)),
-        Cell::from(Span::styled("BRANCH", hdr_style)),
-        Cell::from(Span::styled("BASE", hdr_style)),
-        Cell::from(Span::styled("REPO", hdr_style)),
-    ])
-    .bottom_margin(1);
-
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(1),
-            Constraint::Length(status_w + 1),
-            Constraint::Length(mr_w + 1),
-            Constraint::Length(branch_w + 2),
-            Constraint::Length(if base_col_w > 0 { base_col_w + 2 } else { 0 }),
-            Constraint::Min(repo_w),
-        ],
-    )
-    .header(header)
-    .block(Block::default().borders(Borders::NONE));
-
-    frame.render_widget(table, area);
+    let widget = AgentTableWidget::new(&app.agents)
+        .mr_kinds(&mr_kinds)
+        .selected(app.selected)
+        .spinner_frame(app.spinner_frame)
+        .empty_message(empty_message);
+    frame.render_widget(&widget, area);
 }
 
 fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
@@ -1197,6 +1037,7 @@ fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{Agent, AgentStatus};
     use crate::app::Action;
     use crate::app::{NewAgentSource, RemoteList};
     use crate::config::Config;
