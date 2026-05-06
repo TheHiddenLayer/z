@@ -50,7 +50,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ])
     .split(inner);
 
-    draw_preview(frame, app, chunks[0]);
+    if matches!(app.mode, Mode::NewAgent { .. }) {
+        draw_new_agent_panel(frame, app, chunks[0]);
+    } else {
+        draw_preview(frame, app, chunks[0]);
+    }
 
     // chunks[1] is empty breathing room above separator
     draw_separator(frame, app, chunks[2]);
@@ -61,11 +65,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Modal overlays
     match &app.mode {
-        Mode::NewAgent { .. } => {
-            let modal_area = centered_rect(60, 88, frame.area());
-            frame.render_widget(Clear, modal_area);
-            draw_new_agent_modal(frame, app, modal_area);
-        }
         Mode::ConfirmDelete => {
             let modal_area = centered_rect(52, 28, frame.area());
             frame.render_widget(Clear, modal_area);
@@ -409,7 +408,8 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let total = app.agents.len();
-    let position_spans: Option<Vec<Span>> = if total > 0 {
+    let has_new_agent_candidate = matches!(app.mode, Mode::NewAgent { .. });
+    let position_spans: Option<Vec<Span>> = if total > 0 || has_new_agent_candidate {
         let dim_style = Style::default().fg(DIM);
         let mut spans = vec![Span::styled(" ", dim_style)];
         for (i, agent) in app.agents.iter().enumerate() {
@@ -423,6 +423,12 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
             if i + 1 < total {
                 spans.push(Span::styled(" ", dim_style));
             }
+        }
+        if has_new_agent_candidate {
+            if total > 0 {
+                spans.push(Span::styled(" ", dim_style));
+            }
+            spans.push(Span::styled("\u{25E6}", dim_style));
         }
         spans.push(Span::styled(" ", dim_style));
         Some(spans)
@@ -738,15 +744,9 @@ fn new_agent_layout_sizing(
     }
 }
 
-fn draw_new_agent_modal(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_new_agent_panel(frame: &mut Frame, app: &App, area: Rect) {
     use crate::app::{BranchMode, NewAgentFocus};
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(DIM))
-        .title(modal_title("New Agent"));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = area;
 
     let Mode::NewAgent {
         repo_index,
@@ -1197,14 +1197,63 @@ fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Action;
     use crate::app::{NewAgentSource, RemoteList};
+    use crate::config::Config;
     use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    fn test_app() -> App {
+        let toml_str = r#"repos = ["/tmp/myapp"]"#;
+        let config = Config::from_toml_str(toml_str).unwrap();
+        App::new(config)
+    }
+
+    fn mock_agent(branch: &str) -> Agent {
+        let slug = branch.replace('/', "-");
+        Agent {
+            repo_path: "/tmp/myapp".into(),
+            repo_name: "myapp".into(),
+            branch: branch.into(),
+            base_branch: None,
+            worktree_path: format!("/tmp/myapp-worktrees/{slug}").into(),
+            slug: slug.clone(),
+            session_name: format!("z-myapp-{slug}"),
+            status: AgentStatus::Running,
+            agent_name: "codex".into(),
+            last_pane_hash: None,
+            last_attached_count: Some(0),
+            quiet_captures: 0,
+            seen_activity_since_seed: false,
+            was_spinner_visible: false,
+            consecutive_emits: 0,
+        }
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        let width = buffer.area().width as usize;
+        buffer
+            .content()
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn render_app(app: &App) -> String {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+
+        buffer_text(terminal.backend().buffer())
     }
 
     fn issue(iid: u64, title: &str) -> GitlabIssue {
@@ -1288,6 +1337,39 @@ mod tests {
         let line = remote_status_line("loading assigned issues...", 3);
 
         assert_eq!(line_text(&line), "   loading assigned issues...");
+    }
+
+    #[test]
+    fn new_agent_wizard_uses_preview_panel_without_hiding_agent_table() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        app.update(Action::StartNewAgent);
+
+        let text = render_app(&app);
+
+        assert!(text.contains("Start from"));
+        assert!(
+            text.contains("BRANCH"),
+            "agent table header should remain visible while the wizard is open:\n{text}"
+        );
+        assert!(
+            !text.contains("New Agent"),
+            "wizard should not draw a centered modal title:\n{text}"
+        );
+    }
+
+    #[test]
+    fn new_agent_wizard_adds_draft_dot_to_separator() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth"), mock_agent("docs")];
+        app.update(Action::StartNewAgent);
+
+        let text = render_app(&app);
+
+        assert!(
+            text.contains("\u{25E6}"),
+            "separator should include a draft candidate dot while wizard is open:\n{text}"
+        );
     }
 
     #[test]
