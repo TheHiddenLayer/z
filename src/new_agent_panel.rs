@@ -1,4 +1,4 @@
-use crate::app::{App, BranchMode, Mode, NewAgentFocus, NewAgentSource, RemoteList};
+use crate::app::{App, BranchMode, Mode, NewAgentFocus, NewAgentSource, PromptMode, RemoteList};
 use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
 use crate::style::{DIM, TEXT, footer_hint};
 use ratatui::{
@@ -13,6 +13,7 @@ use ratatui::{
 };
 
 const NEW_AGENT_LABEL_W: u16 = 14;
+const MAX_TASK_NAME_WIDTH: u16 = 40;
 
 pub struct NewAgentPanelWidget<'a> {
     app: &'a App,
@@ -38,6 +39,198 @@ fn source_label(source: NewAgentSource) -> &'static str {
         NewAgentSource::Mr => "mr",
         NewAgentSource::Branch => "branch",
     }
+}
+
+fn source_tabs_row(source: NewAgentSource, focused: bool, label_w: u16) -> Line<'static> {
+    let indicator = if focused { "\u{2502} " } else { "  " };
+    let indicator_style = if focused {
+        Style::default().fg(TEXT)
+    } else {
+        Style::default()
+    };
+    let label_style = if focused {
+        Style::default().fg(TEXT)
+    } else {
+        Style::default().fg(DIM)
+    };
+    let selected_style = Style::default().fg(TEXT).add_modifier(Modifier::BOLD);
+    let inactive_style = Style::default().fg(DIM);
+    let label = "Source";
+    let label_padding = (label_w as usize).saturating_sub(label.len() + 2);
+
+    let mut spans = vec![
+        Span::styled(indicator.to_string(), indicator_style),
+        Span::styled(label.to_string(), label_style),
+        Span::raw(" ".repeat(label_padding)),
+    ];
+    for (index, candidate) in [
+        NewAgentSource::Issue,
+        NewAgentSource::Mr,
+        NewAgentSource::Branch,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            spans.push(Span::styled("  ", Style::default().fg(DIM)));
+        }
+        let style = if candidate == source {
+            selected_style
+        } else {
+            inactive_style
+        };
+        spans.push(Span::styled(source_label(candidate).to_string(), style));
+    }
+    Line::from(spans)
+}
+
+fn tabbed_row(
+    label: &str,
+    options: &[&str],
+    selected: usize,
+    focused: bool,
+    label_w: u16,
+) -> Line<'static> {
+    let indicator = if focused { "\u{2502} " } else { "  " };
+    let indicator_style = if focused {
+        Style::default().fg(TEXT)
+    } else {
+        Style::default()
+    };
+    let label_style = if focused {
+        Style::default().fg(TEXT)
+    } else {
+        Style::default().fg(DIM)
+    };
+    let selected_style = Style::default().fg(TEXT).add_modifier(Modifier::BOLD);
+    let inactive_style = Style::default().fg(DIM);
+    let label_padding = (label_w as usize).saturating_sub(label.len() + 2);
+
+    let mut spans = vec![
+        Span::styled(indicator.to_string(), indicator_style),
+        Span::styled(label.to_string(), label_style),
+        Span::raw(" ".repeat(label_padding)),
+    ];
+    for (index, option) in options.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("  ", Style::default().fg(DIM)));
+        }
+        let style = if index == selected {
+            selected_style
+        } else {
+            inactive_style
+        };
+        spans.push(Span::styled((*option).to_string(), style));
+    }
+    Line::from(spans)
+}
+
+fn prompt_tabs_row(prompt_mode: PromptMode, focused: bool, label_w: u16) -> Line<'static> {
+    let selected = if matches!(prompt_mode, PromptMode::Generated) {
+        0
+    } else {
+        1
+    };
+    tabbed_row("Prompt", &["default", "custom"], selected, focused, label_w)
+}
+
+fn agent_tabs_row<'a>(
+    agent_names: impl Iterator<Item = &'a str>,
+    selected_name: &str,
+    focused: bool,
+    label_w: u16,
+) -> Line<'static> {
+    let options: Vec<&str> = agent_names.collect();
+    let selected = options
+        .iter()
+        .position(|name| *name == selected_name)
+        .unwrap_or(0);
+    tabbed_row("Agent", &options, selected, focused, label_w)
+}
+
+fn prompt_summary(
+    source: NewAgentSource,
+    prompt_mode: PromptMode,
+    prompt: &str,
+    max_width: u16,
+) -> String {
+    let summary = if matches!(prompt_mode, PromptMode::Custom) && !prompt.trim().is_empty() {
+        prompt.lines().next().unwrap_or("").trim()
+    } else if prompt.trim().is_empty() {
+        "optional prompt"
+    } else if matches!(prompt_mode, PromptMode::Custom) {
+        "custom prompt"
+    } else {
+        match source {
+            NewAgentSource::Issue => "generated from issue",
+            NewAgentSource::Mr => "generated from MR",
+            NewAgentSource::Branch => "optional prompt",
+        }
+    };
+    truncate_end(summary, max_width as usize)
+}
+
+fn text_width(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+fn take_prefix_width(s: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        let mut next = out.clone();
+        next.push(ch);
+        if text_width(&next) > max_width {
+            break;
+        }
+        out = next;
+    }
+    out
+}
+
+fn take_suffix_width(s: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    for ch in s.chars().rev() {
+        let mut next = String::new();
+        next.push(ch);
+        next.push_str(&out);
+        if text_width(&next) > max_width {
+            break;
+        }
+        out = next;
+    }
+    out
+}
+
+fn truncate_end(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if text_width(s) <= max_width {
+        return s.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let prefix = take_prefix_width(s, max_width - 3);
+    format!("{prefix}...")
+}
+
+fn truncate_middle(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if text_width(s) <= max_width {
+        return s.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let available = max_width - 3;
+    let prefix_width = available / 2 + available % 2;
+    let suffix_width = available / 2;
+    let prefix = take_prefix_width(s, prefix_width);
+    let suffix = take_suffix_width(s, suffix_width);
+    format!("{prefix}...{suffix}")
 }
 
 fn remote_status_line(message: &str, label_w: u16) -> Line<'static> {
@@ -248,6 +441,7 @@ struct NewAgentLayoutSizing {
     gap_after_agent: u16,
     gap_after_repo: u16,
     gap_after_list: u16,
+    prompt_height: u16,
     list_height: u16,
     #[cfg(test)]
     required_non_list_height: u16,
@@ -279,8 +473,10 @@ fn new_agent_layout_sizing(
     show_gitlab_source: bool,
     show_branch_toggle: bool,
     show_name_row: bool,
+    prompt_height: u16,
 ) -> NewAgentLayoutSizing {
-    let required_non_list_height = 8
+    let required_non_list_height = 5
+        + prompt_height
         + u16::from(show_gitlab_source)
         + u16::from(show_branch_toggle)
         + u16::from(show_name_row);
@@ -300,6 +496,7 @@ fn new_agent_layout_sizing(
         gap_after_agent: take_spacer(),
         gap_after_repo: take_spacer(),
         gap_after_list: take_spacer(),
+        prompt_height,
         list_height,
         #[cfg(test)]
         required_non_list_height,
@@ -320,7 +517,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         selected_mr: _,
         branch_mode,
         prompt,
-        prompt_mode: _,
+        prompt_mode,
         focus,
         base_index,
         branches,
@@ -355,29 +552,32 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     let show_issue_name = matches!(source, NewAgentSource::Issue);
     let show_name_row = show_name || show_issue_name;
     let name_rows = u16::from(show_name_row);
+    let is_prompt = matches!(focus, NewAgentFocus::Prompt);
+    let prompt_height = if is_prompt { 3 } else { 1 };
     let sizing = new_agent_layout_sizing(
         inner.height,
         desired_list_height,
         show_gitlab_source,
         show_branch_toggle,
         show_name_row,
+        prompt_height,
     );
 
     let chunks = Layout::vertical([
         Constraint::Length(sizing.top_padding),
-        Constraint::Length(1), // Start from row
-        Constraint::Length(sizing.gap_after_source),
-        Constraint::Length(1), // Agent row
-        Constraint::Length(sizing.gap_after_agent),
         Constraint::Length(1), // Repo row
         Constraint::Length(sizing.gap_after_repo),
+        Constraint::Length(1), // Source row
+        Constraint::Length(sizing.gap_after_source),
         Constraint::Length(if show_branch_toggle { 1 } else { 0 }),
         Constraint::Length(sizing.source_area_height(show_gitlab_source)),
         Constraint::Length(sizing.gap_after_list),
-        Constraint::Length(name_rows), // Name row
-        Constraint::Length(1),         // Prompt label
-        Constraint::Min(3),            // Prompt area
-        Constraint::Length(1),         // hint bar
+        Constraint::Length(name_rows),            // Name row
+        Constraint::Length(1),                    // Prompt label
+        Constraint::Length(sizing.prompt_height), // Prompt area
+        Constraint::Length(sizing.gap_after_agent),
+        Constraint::Length(1), // Agent row
+        Constraint::Length(1), // hint bar
     ])
     .split(inner);
 
@@ -413,7 +613,11 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             Style::default().fg(DIM)
         };
         let label_style = row_style;
-        let value_style = row_style;
+        let value_style = if focused {
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT)
+        };
         let label_field_w = label_w as usize;
         // Label occupies the label column; value starts at column label_w + 2.
         let label_padding = label_field_w.saturating_sub(label.len() + 2);
@@ -425,20 +629,15 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         ])
     };
 
-    // --- Source row ---
-    let is_source = matches!(focus, NewAgentFocus::Source);
-    let source_line = picker_row("Start from", source_label(*source), is_source);
-    Paragraph::new(source_line).render(chunks[1], buf);
-
-    // --- Agent row ---
-    let is_agent = matches!(focus, NewAgentFocus::Agent);
-    let agent_line = picker_row("Agent", agent_name.as_str(), is_agent);
-    Paragraph::new(agent_line).render(chunks[3], buf);
-
     // --- Repo row ---
     let is_repo = matches!(focus, NewAgentFocus::Repo);
     let repo_line = picker_row("Repo", repo_name, is_repo);
-    Paragraph::new(repo_line).render(chunks[5], buf);
+    Paragraph::new(repo_line).render(chunks[1], buf);
+
+    // --- Source row ---
+    let is_source = matches!(focus, NewAgentFocus::Source);
+    let source_line = source_tabs_row(*source, is_source, label_w);
+    Paragraph::new(source_line).render(chunks[3], buf);
 
     // --- Branch toggle row ---
     if show_branch_toggle {
@@ -448,11 +647,11 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             BranchMode::Existing => "Existing",
         };
         let toggle_line = picker_row("Branch", mode_label, is_toggle);
-        Paragraph::new(toggle_line).render(chunks[7], buf);
+        Paragraph::new(toggle_line).render(chunks[5], buf);
     }
 
     // --- Source or branch list ---
-    let list_slot = chunks[8];
+    let list_slot = chunks[6];
     if show_gitlab_source {
         let source_chunks = Layout::vertical([
             Constraint::Length(1),
@@ -516,42 +715,62 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     }
 
     // --- Name row ---
+    let name_value_width = chunks[8]
+        .width
+        .saturating_sub(label_w)
+        .max(1)
+        .min(MAX_TASK_NAME_WIDTH) as usize;
     if show_name {
         let is_name = matches!(focus, NewAgentFocus::Name);
         let name_display = if is_name && *name_pristine {
             // Pristine auto-suggested name: dim + italic so it reads as a
             // placeholder that will be replaced the moment the user types.
+            let name = truncate_middle(branch_name, name_value_width);
             Span::styled(
-                branch_name.as_str(),
+                name,
                 Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
             )
         } else {
             let cursor = if is_name { "_" } else { "" };
-            Span::styled(format!("{branch_name}{cursor}"), val_style(is_name))
+            let max_width = name_value_width.saturating_sub(cursor.len());
+            let name = truncate_middle(branch_name, max_width);
+            Span::styled(format!("{name}{cursor}"), val_style(is_name))
         };
         let name_line = Line::from(vec![
             Span::styled("  Name", label_style(is_name)),
             Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
             name_display,
         ]);
-        Paragraph::new(name_line).render(chunks[10], buf);
+        Paragraph::new(name_line).render(chunks[8], buf);
     } else if show_issue_name {
+        let name = truncate_middle(branch_name, name_value_width);
         let name_line = Line::from(vec![
             Span::styled("  Name", Style::default().fg(DIM)),
             Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
-            Span::styled(branch_name.as_str(), Style::default().fg(DIM)),
+            Span::styled(name, Style::default().fg(TEXT)),
         ]);
-        Paragraph::new(name_line).render(chunks[10], buf);
+        Paragraph::new(name_line).render(chunks[8], buf);
     }
 
-    // --- Prompt label ---
-    let is_prompt = matches!(focus, NewAgentFocus::Prompt);
-    let prompt_label = Line::from(Span::styled("  Prompt", label_style(is_prompt)));
-    Paragraph::new(prompt_label).render(chunks[11], buf);
+    // --- Prompt tabs ---
+    let prompt_label = prompt_tabs_row(*prompt_mode, is_prompt, label_w);
+    Paragraph::new(prompt_label).render(chunks[9], buf);
 
     // --- Prompt area ---
-    let prompt_area = chunks[12];
-    if prompt.is_empty() {
+    let prompt_area = chunks[10];
+    if !is_prompt {
+        let summary = prompt_summary(
+            *source,
+            *prompt_mode,
+            prompt,
+            prompt_area.width.saturating_sub(label_w),
+        );
+        let line = Line::from(vec![
+            Span::raw(" ".repeat(label_w as usize)),
+            Span::styled(summary, Style::default().fg(DIM)),
+        ]);
+        Paragraph::new(line).render(prompt_area, buf);
+    } else if prompt.is_empty() {
         let placeholder = if is_prompt {
             Line::from(vec![
                 Span::raw(" ".repeat(label_w as usize)),
@@ -585,6 +804,16 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             .scroll((scroll, 0));
         paragraph.render(prompt_area, buf);
     }
+
+    // --- Agent tabs ---
+    let is_agent = matches!(focus, NewAgentFocus::Agent);
+    let agent_line = agent_tabs_row(
+        app.config.agents.iter().map(|(name, _)| name.as_str()),
+        agent_name,
+        is_agent,
+        label_w,
+    );
+    Paragraph::new(agent_line).render(chunks[12], buf);
 
     // --- Hint bar ---
     let hint_line = match focus {
@@ -735,7 +964,7 @@ mod tests {
 
     #[test]
     fn layout_sizing_caps_list_to_one_when_inner_height_is_tight() {
-        let sizing = new_agent_layout_sizing(11, 6, true, false, true);
+        let sizing = new_agent_layout_sizing(11, 6, true, false, true, 3);
 
         assert_eq!(sizing.list_height, 1);
         assert_eq!(sizing.total_height(), 11);
@@ -744,7 +973,7 @@ mod tests {
 
     #[test]
     fn layout_sizing_preserves_required_rows_at_minimum_supported_height() {
-        let sizing = new_agent_layout_sizing(12, 6, true, true, true);
+        let sizing = new_agent_layout_sizing(12, 6, true, true, true, 3);
 
         assert_eq!(sizing.list_height, 1);
         assert_eq!(sizing.total_height(), 12);
@@ -753,7 +982,7 @@ mod tests {
 
     #[test]
     fn layout_sizing_allows_six_list_rows_when_height_is_available() {
-        let sizing = new_agent_layout_sizing(21, 6, true, false, true);
+        let sizing = new_agent_layout_sizing(21, 6, true, false, true, 3);
 
         assert_eq!(sizing.list_height, 6);
         assert_eq!(sizing.total_height(), 21);

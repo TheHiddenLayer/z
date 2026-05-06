@@ -298,6 +298,35 @@ fn select_mr_by_index(
     Some(mr)
 }
 
+fn reset_prompt_for_source(
+    source: NewAgentSource,
+    selected_issue: &Option<GitlabIssue>,
+    selected_mr: &Option<GitlabMergeRequest>,
+    prompt: &mut String,
+    prompt_mode: &mut PromptMode,
+) {
+    match source {
+        NewAgentSource::Issue => {
+            if let Some(issue) = selected_issue.as_ref() {
+                *prompt = crate::gitlab::issue_prompt(issue);
+            } else {
+                prompt.clear();
+            }
+        }
+        NewAgentSource::Mr => {
+            if let Some(mr) = selected_mr.as_ref() {
+                *prompt = crate::gitlab::mr_prompt(mr);
+            } else {
+                prompt.clear();
+            }
+        }
+        NewAgentSource::Branch => {
+            prompt.clear();
+        }
+    }
+    *prompt_mode = PromptMode::Generated;
+}
+
 fn issue_selection_is_visible(
     issues: &RemoteList<GitlabIssue>,
     query: &str,
@@ -726,7 +755,7 @@ impl App {
                     branch_mode: BranchMode::New,
                     prompt: String::new(),
                     prompt_mode: PromptMode::Generated,
-                    focus: NewAgentFocus::Source,
+                    focus: NewAgentFocus::Repo,
                     base_index: 0,
                     branches: Vec::new(),
                     existing_branches: Vec::new(),
@@ -850,7 +879,7 @@ impl App {
                                 *base_index = (*base_index + 1) % count;
                             }
                         }
-                        NewAgentFocus::SourceList => match source {
+                        NewAgentFocus::Search | NewAgentFocus::SourceList => match source {
                             NewAgentSource::Issue => {
                                 if let RemoteList::Loaded(items) = issues {
                                     let indices = filtered_issue_indices(items, source_query);
@@ -895,6 +924,18 @@ impl App {
                                 }
                             }
                             NewAgentSource::Branch => {}
+                        },
+                        NewAgentFocus::Prompt => match prompt_mode {
+                            PromptMode::Generated => {
+                                *prompt_mode = PromptMode::Custom;
+                            }
+                            PromptMode::Custom => reset_prompt_for_source(
+                                *source,
+                                selected_issue,
+                                selected_mr,
+                                prompt,
+                                prompt_mode,
+                            ),
                         },
                         _ => {}
                     },
@@ -1012,7 +1053,7 @@ impl App {
                                 *base_index = base_index.checked_sub(1).unwrap_or(count - 1);
                             }
                         }
-                        NewAgentFocus::SourceList => match source {
+                        NewAgentFocus::Search | NewAgentFocus::SourceList => match source {
                             NewAgentSource::Issue => {
                                 if let RemoteList::Loaded(items) = issues {
                                     let indices = filtered_issue_indices(items, source_query);
@@ -1065,6 +1106,18 @@ impl App {
                                 }
                             }
                             NewAgentSource::Branch => {}
+                        },
+                        NewAgentFocus::Prompt => match prompt_mode {
+                            PromptMode::Generated => {
+                                *prompt_mode = PromptMode::Custom;
+                            }
+                            PromptMode::Custom => reset_prompt_for_source(
+                                *source,
+                                selected_issue,
+                                selected_mr,
+                                prompt,
+                                prompt_mode,
+                            ),
                         },
                         _ => {}
                     },
@@ -1839,28 +1892,13 @@ impl App {
                     ..
                 } = &mut self.mode
                 {
-                    match source {
-                        NewAgentSource::Issue => {
-                            if let Some(issue) = selected_issue.as_ref() {
-                                *prompt = crate::gitlab::issue_prompt(issue);
-                            } else {
-                                prompt.clear();
-                            }
-                            *prompt_mode = PromptMode::Generated;
-                        }
-                        NewAgentSource::Mr => {
-                            if let Some(mr) = selected_mr.as_ref() {
-                                *prompt = crate::gitlab::mr_prompt(mr);
-                            } else {
-                                prompt.clear();
-                            }
-                            *prompt_mode = PromptMode::Generated;
-                        }
-                        NewAgentSource::Branch => {
-                            prompt.clear();
-                            *prompt_mode = PromptMode::Generated;
-                        }
-                    }
+                    reset_prompt_for_source(
+                        *source,
+                        selected_issue,
+                        selected_mr,
+                        prompt,
+                        prompt_mode,
+                    );
                 }
             }
             Action::GitlabIssuesLoaded { repo, result } => {
@@ -2205,15 +2243,14 @@ impl App {
                         *name_pristine = true;
                     }
                     *focus = match (&*focus, &*source, &*branch_mode) {
-                        (NewAgentFocus::Source, _, _) => NewAgentFocus::Agent,
-                        (NewAgentFocus::Agent, _, _) => NewAgentFocus::Repo,
-                        (NewAgentFocus::Repo, NewAgentSource::Issue | NewAgentSource::Mr, _) => {
+                        (NewAgentFocus::Repo, _, _) => NewAgentFocus::Source,
+                        (NewAgentFocus::Source, NewAgentSource::Issue | NewAgentSource::Mr, _) => {
                             NewAgentFocus::Search
                         }
-                        (NewAgentFocus::Repo, NewAgentSource::Branch, _) => {
+                        (NewAgentFocus::Source, NewAgentSource::Branch, _) => {
                             NewAgentFocus::BranchToggle
                         }
-                        (NewAgentFocus::Search, _, _) => NewAgentFocus::SourceList,
+                        (NewAgentFocus::Search, _, _) => NewAgentFocus::Prompt,
                         (NewAgentFocus::SourceList, _, _) => NewAgentFocus::Prompt,
                         (NewAgentFocus::BranchToggle, _, _) => NewAgentFocus::BranchList,
                         (NewAgentFocus::BranchList, NewAgentSource::Branch, BranchMode::New) => {
@@ -2221,7 +2258,8 @@ impl App {
                         }
                         (NewAgentFocus::BranchList, _, _) => NewAgentFocus::Prompt,
                         (NewAgentFocus::Name, _, _) => NewAgentFocus::Prompt,
-                        (NewAgentFocus::Prompt, _, _) => NewAgentFocus::Source,
+                        (NewAgentFocus::Prompt, _, _) => NewAgentFocus::Agent,
+                        (NewAgentFocus::Agent, _, _) => NewAgentFocus::Repo,
                     };
                 }
             }
@@ -2242,16 +2280,16 @@ impl App {
                         *name_pristine = true;
                     }
                     *focus = match (&*focus, &*source, &*branch_mode) {
-                        (NewAgentFocus::Source, _, _) => NewAgentFocus::Prompt,
-                        (NewAgentFocus::Agent, _, _) => NewAgentFocus::Source,
                         (NewAgentFocus::Repo, _, _) => NewAgentFocus::Agent,
-                        (NewAgentFocus::Search, _, _) => NewAgentFocus::Repo,
+                        (NewAgentFocus::Source, _, _) => NewAgentFocus::Repo,
+                        (NewAgentFocus::Agent, _, _) => NewAgentFocus::Prompt,
+                        (NewAgentFocus::Search, _, _) => NewAgentFocus::Source,
                         (NewAgentFocus::SourceList, _, _) => NewAgentFocus::Search,
-                        (NewAgentFocus::BranchToggle, _, _) => NewAgentFocus::Repo,
+                        (NewAgentFocus::BranchToggle, _, _) => NewAgentFocus::Source,
                         (NewAgentFocus::BranchList, _, _) => NewAgentFocus::BranchToggle,
                         (NewAgentFocus::Name, _, _) => NewAgentFocus::BranchList,
                         (NewAgentFocus::Prompt, NewAgentSource::Issue | NewAgentSource::Mr, _) => {
-                            NewAgentFocus::SourceList
+                            NewAgentFocus::Search
                         }
                         (NewAgentFocus::Prompt, NewAgentSource::Branch, BranchMode::New) => {
                             NewAgentFocus::Name
@@ -2331,6 +2369,7 @@ impl App {
                             | NewAgentFocus::Agent
                             | NewAgentFocus::Repo
                             | NewAgentFocus::BranchToggle
+                            | NewAgentFocus::Prompt
                     ) =>
                 {
                     Some(Action::PickerPrev)
@@ -2342,18 +2381,29 @@ impl App {
                             | NewAgentFocus::Agent
                             | NewAgentFocus::Repo
                             | NewAgentFocus::BranchToggle
+                            | NewAgentFocus::Prompt
                     ) =>
                 {
                     Some(Action::PickerNext)
                 }
                 // Vertical fields: SourceList, BranchList
                 KeyCode::Up
-                    if matches!(focus, NewAgentFocus::SourceList | NewAgentFocus::BranchList) =>
+                    if matches!(
+                        focus,
+                        NewAgentFocus::Search
+                            | NewAgentFocus::SourceList
+                            | NewAgentFocus::BranchList
+                    ) =>
                 {
                     Some(Action::PickerPrev)
                 }
                 KeyCode::Down
-                    if matches!(focus, NewAgentFocus::SourceList | NewAgentFocus::BranchList) =>
+                    if matches!(
+                        focus,
+                        NewAgentFocus::Search
+                            | NewAgentFocus::SourceList
+                            | NewAgentFocus::BranchList
+                    ) =>
                 {
                     Some(Action::PickerNext)
                 }
@@ -3246,7 +3296,7 @@ mod tests {
             app.mode,
             Mode::NewAgent {
                 source: NewAgentSource::Issue,
-                focus: NewAgentFocus::Source,
+                focus: NewAgentFocus::Repo,
                 ..
             }
         ));
@@ -3533,6 +3583,70 @@ mod tests {
             app.handle_key(make_key(KeyCode::Char('r'))),
             Some(Action::TypeChar('r'))
         ));
+    }
+
+    #[test]
+    fn prompt_tabs_left_right_map_to_picker() {
+        let mut app = test_app_in_new_agent_mode();
+        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+            *focus = NewAgentFocus::Prompt;
+        }
+
+        assert!(matches!(
+            app.handle_key(make_key(KeyCode::Right)),
+            Some(Action::PickerNext)
+        ));
+        assert!(matches!(
+            app.handle_key(make_key(KeyCode::Left)),
+            Some(Action::PickerPrev)
+        ));
+    }
+
+    #[test]
+    fn prompt_tabs_toggle_between_default_and_custom() {
+        let mut app = test_app_in_new_agent_mode();
+        if let Mode::NewAgent {
+            source,
+            focus,
+            selected_issue,
+            prompt,
+            prompt_mode,
+            ..
+        } = &mut app.mode
+        {
+            *source = NewAgentSource::Issue;
+            *focus = NewAgentFocus::Prompt;
+            let selected = issue(42, "Fix task setup");
+            *selected_issue = Some(selected.clone());
+            *prompt = crate::gitlab::issue_prompt(&selected);
+            *prompt_mode = PromptMode::Generated;
+        }
+
+        app.update(Action::PickerNext);
+        if let Mode::NewAgent {
+            prompt,
+            prompt_mode,
+            ..
+        } = &mut app.mode
+        {
+            assert_eq!(*prompt_mode, PromptMode::Custom);
+            *prompt = "custom prompt".into();
+        } else {
+            panic!("expected NewAgent mode");
+        }
+
+        app.update(Action::PickerPrev);
+        if let Mode::NewAgent {
+            prompt,
+            prompt_mode,
+            ..
+        } = &app.mode
+        {
+            assert_eq!(*prompt_mode, PromptMode::Generated);
+            assert!(prompt.starts_with("Work on GitLab issue #42"));
+        } else {
+            panic!("expected NewAgent mode");
+        }
     }
 
     #[test]
@@ -4134,16 +4248,15 @@ mod tests {
         let mut app = test_app_in_new_agent_mode();
         if let Mode::NewAgent { source, focus, .. } = &mut app.mode {
             *source = NewAgentSource::Issue;
-            *focus = NewAgentFocus::Source;
+            *focus = NewAgentFocus::Repo;
         }
 
         let expected = vec![
+            NewAgentFocus::Source,
+            NewAgentFocus::Search,
+            NewAgentFocus::Prompt,
             NewAgentFocus::Agent,
             NewAgentFocus::Repo,
-            NewAgentFocus::Search,
-            NewAgentFocus::SourceList,
-            NewAgentFocus::Prompt,
-            NewAgentFocus::Source,
         ];
         for exp in expected {
             app.update(Action::FocusNext);
@@ -4790,7 +4903,7 @@ mod tests {
             repo_index: 0,
             branch_mode: BranchMode::New,
             prompt: String::new(),
-            focus: NewAgentFocus::Agent,
+            focus: NewAgentFocus::Repo,
             base_index: 0,
             branches: vec!["main".into()],
             existing_branches: Vec::new(),
@@ -4799,13 +4912,13 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         let expected = vec![
-            NewAgentFocus::Repo,
+            NewAgentFocus::Source,
             NewAgentFocus::BranchToggle,
             NewAgentFocus::BranchList,
             NewAgentFocus::Name,
             NewAgentFocus::Prompt,
-            NewAgentFocus::Source,
             NewAgentFocus::Agent,
+            NewAgentFocus::Repo,
         ];
         for exp in expected {
             app.update(Action::FocusNext);
@@ -5198,11 +5311,11 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         let expected = vec![
+            NewAgentFocus::Source,
             NewAgentFocus::BranchToggle,
             NewAgentFocus::BranchList,
             NewAgentFocus::Name,
             NewAgentFocus::Prompt,
-            NewAgentFocus::Source,
             NewAgentFocus::Agent,
             NewAgentFocus::Repo,
         ];
@@ -5232,10 +5345,10 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         let expected = vec![
+            NewAgentFocus::Source,
             NewAgentFocus::BranchToggle,
             NewAgentFocus::BranchList,
             NewAgentFocus::Prompt, // skips Name
-            NewAgentFocus::Source,
             NewAgentFocus::Agent,
             NewAgentFocus::Repo,
         ];
@@ -5974,14 +6087,14 @@ mod tests {
     }
 
     #[test]
-    fn start_new_agent_begins_at_source_focus() {
+    fn start_new_agent_begins_at_repo_focus() {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
         if let Mode::NewAgent {
             focus, branch_mode, ..
         } = &app.mode
         {
-            assert_eq!(*focus, NewAgentFocus::Source);
+            assert_eq!(*focus, NewAgentFocus::Repo);
             assert_eq!(*branch_mode, BranchMode::New);
         } else {
             panic!("expected NewAgent mode");
