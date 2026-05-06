@@ -3,6 +3,7 @@ mod agent_table;
 mod app;
 mod config;
 mod gitlab;
+mod new_agent_panel;
 mod notifications;
 mod style;
 mod ui;
