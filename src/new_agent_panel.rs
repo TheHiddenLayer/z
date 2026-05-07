@@ -1116,11 +1116,11 @@ mod tests {
         let on_prompt = render_with_focus(NewAgentFocus::Prompt, area);
 
         // The focus accent bar plus the value column may legitimately differ.
-        // Everything in columns 0..NEW_AGENT_LABEL_W (label column) must be
-        // identical. (Task 2 will introduce `LABEL_W`; until then we pin
-        // against the existing constant.)
-        let a = cells_outside_columns(&on_repo, 0..NEW_AGENT_LABEL_W);
-        let b = cells_outside_columns(&on_prompt, 0..NEW_AGENT_LABEL_W);
+        // The label column (columns 0..LABEL_W) must be identical, because every
+        // row's label is invariant — if rows shift vertically, label glyphs land
+        // at different y between the two states.
+        let a = cells_outside_columns(&on_repo, NEW_AGENT_LABEL_W..area.width);
+        let b = cells_outside_columns(&on_prompt, NEW_AGENT_LABEL_W..area.width);
 
         assert_eq!(
             a, b,
