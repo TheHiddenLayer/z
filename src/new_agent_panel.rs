@@ -3,7 +3,7 @@ use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
 use crate::style::{DIM, TEXT, footer_hint};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Flex, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -15,6 +15,8 @@ use ratatui::{
 const NEW_AGENT_LABEL_W: u16 = 14;
 const MAX_TASK_NAME_WIDTH: u16 = 40;
 const MAX_SOURCE_LIST_WIDTH: u16 = 88;
+const LABEL_W: u16 = NEW_AGENT_LABEL_W;
+const PROMPT_BODY_HEIGHT: u16 = 3;
 
 pub struct NewAgentPanelWidget<'a> {
     app: &'a App,
@@ -43,12 +45,6 @@ fn source_label(source: NewAgentSource) -> &'static str {
 }
 
 fn source_tabs_row(source: NewAgentSource, focused: bool, label_w: u16) -> Line<'static> {
-    let indicator = if focused { "\u{2502} " } else { "  " };
-    let indicator_style = if focused {
-        Style::default().fg(TEXT)
-    } else {
-        Style::default()
-    };
     let label_style = if focused {
         Style::default().fg(TEXT)
     } else {
@@ -57,10 +53,13 @@ fn source_tabs_row(source: NewAgentSource, focused: bool, label_w: u16) -> Line<
     let selected_style = Style::default().fg(TEXT).add_modifier(Modifier::BOLD);
     let inactive_style = Style::default().fg(DIM);
     let label = "Source";
+    // Label column is fixed-width (`label_w`). Two leading spaces reserve the
+    // focus-accent gutter that Task 8 will draw via `Borders::LEFT`; keeping
+    // them constant makes row geometry stable across focus changes.
     let label_padding = (label_w as usize).saturating_sub(label.len() + 2);
 
     let mut spans = vec![
-        Span::styled(indicator.to_string(), indicator_style),
+        Span::raw("  ".to_string()),
         Span::styled(label.to_string(), label_style),
         Span::raw(" ".repeat(label_padding)),
     ];
@@ -92,12 +91,6 @@ fn tabbed_row(
     focused: bool,
     label_w: u16,
 ) -> Line<'static> {
-    let indicator = if focused { "\u{2502} " } else { "  " };
-    let indicator_style = if focused {
-        Style::default().fg(TEXT)
-    } else {
-        Style::default()
-    };
     let label_style = if focused {
         Style::default().fg(TEXT)
     } else {
@@ -105,10 +98,11 @@ fn tabbed_row(
     };
     let selected_style = Style::default().fg(TEXT).add_modifier(Modifier::BOLD);
     let inactive_style = Style::default().fg(DIM);
+    // Two leading spaces reserve the focus-accent gutter for Task 8.
     let label_padding = (label_w as usize).saturating_sub(label.len() + 2);
 
     let mut spans = vec![
-        Span::styled(indicator.to_string(), indicator_style),
+        Span::raw("  ".to_string()),
         Span::styled(label.to_string(), label_style),
         Span::raw(" ".repeat(label_padding)),
     ];
@@ -450,75 +444,6 @@ fn render_selectable_list(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct NewAgentLayoutSizing {
-    top_padding: u16,
-    gap_after_source: u16,
-    gap_after_agent: u16,
-    gap_after_repo: u16,
-    gap_after_list: u16,
-    prompt_height: u16,
-    list_height: u16,
-    #[cfg(test)]
-    required_non_list_height: u16,
-}
-
-impl NewAgentLayoutSizing {
-    #[cfg(test)]
-    fn optional_spacer_height(self) -> u16 {
-        self.top_padding
-            + self.gap_after_source
-            + self.gap_after_agent
-            + self.gap_after_repo
-            + self.gap_after_list
-    }
-
-    #[cfg(test)]
-    fn total_height(self) -> u16 {
-        self.required_non_list_height + self.list_height + self.optional_spacer_height()
-    }
-
-    fn source_area_height(self, show_gitlab_source: bool) -> u16 {
-        self.list_height + u16::from(show_gitlab_source)
-    }
-}
-
-fn new_agent_layout_sizing(
-    inner_height: u16,
-    desired_list_height: u16,
-    show_gitlab_source: bool,
-    show_branch_toggle: bool,
-    show_name_row: bool,
-    prompt_height: u16,
-) -> NewAgentLayoutSizing {
-    let required_non_list_height = 5
-        + prompt_height
-        + u16::from(show_gitlab_source)
-        + u16::from(show_branch_toggle)
-        + u16::from(show_name_row);
-    let available_for_list = inner_height.saturating_sub(required_non_list_height).max(1);
-    let list_height = desired_list_height.clamp(1, 6).min(available_for_list);
-    let mut optional_space = inner_height.saturating_sub(required_non_list_height + list_height);
-
-    let mut take_spacer = || {
-        let row = u16::from(optional_space > 0);
-        optional_space = optional_space.saturating_sub(row);
-        row
-    };
-
-    NewAgentLayoutSizing {
-        top_padding: take_spacer(),
-        gap_after_source: take_spacer(),
-        gap_after_agent: take_spacer(),
-        gap_after_repo: take_spacer(),
-        gap_after_list: take_spacer(),
-        prompt_height,
-        list_height,
-        #[cfg(test)]
-        required_non_list_height,
-    }
-}
-
 fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     let inner = area;
 
@@ -557,7 +482,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         BranchMode::New => branches,
         BranchMode::Existing => existing_branches,
     };
-    let label_w = NEW_AGENT_LABEL_W;
+    let label_w = LABEL_W;
     let desired_list_height = source_list_height(*source, issues, mrs, active_list, source_query);
     let show_gitlab_source = matches!(source, NewAgentSource::Issue | NewAgentSource::Mr);
     let show_branch_controls = matches!(source, NewAgentSource::Branch | NewAgentSource::Issue);
@@ -567,35 +492,35 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         && !matches!(source, NewAgentSource::Issue);
     let show_issue_name = matches!(source, NewAgentSource::Issue);
     let show_name_row = show_name || show_issue_name;
-    let name_rows = u16::from(show_name_row);
     let is_prompt = matches!(focus, NewAgentFocus::Prompt);
-    let prompt_height = if is_prompt { 3 } else { 1 };
-    let sizing = new_agent_layout_sizing(
-        inner.height,
-        desired_list_height,
-        show_gitlab_source,
-        show_branch_toggle,
-        show_name_row,
-        prompt_height,
-    );
+    let list_height = desired_list_height.clamp(1, 6);
 
-    let chunks = Layout::vertical([
-        Constraint::Length(sizing.top_padding),
-        Constraint::Length(1), // Repo row
-        Constraint::Length(sizing.gap_after_repo),
-        Constraint::Length(1), // Source row
-        Constraint::Length(sizing.gap_after_source),
-        Constraint::Length(if show_branch_toggle { 1 } else { 0 }),
-        Constraint::Length(sizing.source_area_height(show_gitlab_source)),
-        Constraint::Length(sizing.gap_after_list),
-        Constraint::Length(name_rows),            // Name row
-        Constraint::Length(1),                    // Prompt label
-        Constraint::Length(sizing.prompt_height), // Prompt area
-        Constraint::Length(sizing.gap_after_agent),
-        Constraint::Length(1), // Agent row
-        Constraint::Length(1), // hint bar
-    ])
-    .split(inner);
+    // Row order. `Length(0)` rows render nothing and consume nothing visually.
+    // Dividers reserve zero height in this task; Task 9 will switch them to
+    // `Length(1)` once their `─` glyph is painted. The list row uses `Max` so
+    // it shrinks gracefully in tight viewports. The prompt body uses `Min(1)`
+    // so the solver hands it leftover space — the renderer only ever writes
+    // into the first `PROMPT_BODY_HEIGHT` rows of that rect.
+    let constraints = [
+        Constraint::Length(1),                                      // 0  Repo
+        Constraint::Length(1),                                      // 1  Source
+        Constraint::Length(if show_branch_toggle { 1 } else { 0 }), // 2  Branch toggle
+        Constraint::Length(if show_gitlab_source { 1 } else { 0 }), // 3  Search
+        Constraint::Max(list_height),                               // 4  List
+        Constraint::Length(0),                                      // 5  Divider 1
+        Constraint::Length(if show_name_row { 1 } else { 0 }),      // 6  Name
+        Constraint::Length(1),                                      // 7  Prompt label
+        Constraint::Min(1),                                         // 8  Prompt body
+        Constraint::Length(0),                                      // 9  Divider 2
+        Constraint::Length(1),                                      // 10 Agent
+        Constraint::Length(0),                                      // 11 Divider 3
+        Constraint::Length(1),                                      // 12 Hint
+    ];
+
+    let chunks = Layout::vertical(constraints)
+        .flex(Flex::Start)
+        .spacing(0)
+        .split(inner);
 
     let label_style = |focused: bool| {
         if focused {
@@ -612,17 +537,12 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         }
     };
 
-    // Picker row: "│ Label    value" when focused, "  Label    value" when not.
-    // Selection is encoded by the left bar plus whole-row brightness contrast —
-    // focused rows TEXT, unfocused rows DIM — matching the agent table's
-    // convention. Without it the focus signal is too subtle in a vertical stack.
+    // Picker row: "  Label    value". Focus is conveyed by row brightness
+    // contrast (focused rows TEXT, unfocused DIM) plus value-span boldness.
+    // The focus accent bar will be reintroduced in Task 8 via `Borders::LEFT`
+    // on the value sub-rect — keeping the label column geometry stable here
+    // is what lets `focus_changes_do_not_move_form_rows` hold.
     let picker_row = |label: &str, value: &str, focused: bool| -> Line<'static> {
-        let indicator = if focused { "\u{2502} " } else { "  " };
-        let indicator_style = if focused {
-            Style::default().fg(TEXT)
-        } else {
-            Style::default()
-        };
         let row_style = if focused {
             Style::default().fg(TEXT)
         } else {
@@ -635,10 +555,11 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             Style::default().fg(TEXT)
         };
         let label_field_w = label_w as usize;
-        // Label occupies the label column; value starts at column label_w + 2.
+        // Two leading spaces reserve the focus-accent gutter; value starts at
+        // column `label_w`.
         let label_padding = label_field_w.saturating_sub(label.len() + 2);
         Line::from(vec![
-            Span::styled(indicator.to_string(), indicator_style),
+            Span::raw("  ".to_string()),
             Span::styled(label.to_string(), label_style),
             Span::raw(" ".repeat(label_padding)),
             Span::styled(value.to_string(), value_style),
@@ -648,12 +569,12 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     // --- Repo row ---
     let is_repo = matches!(focus, NewAgentFocus::Repo);
     let repo_line = picker_row("Repo", repo_name, is_repo);
-    Paragraph::new(repo_line).render(chunks[1], buf);
+    Paragraph::new(repo_line).render(chunks[0], buf);
 
     // --- Source row ---
     let is_source = matches!(focus, NewAgentFocus::Source);
     let source_line = source_tabs_row(*source, is_source, label_w);
-    Paragraph::new(source_line).render(chunks[3], buf);
+    Paragraph::new(source_line).render(chunks[1], buf);
 
     // --- Branch toggle row ---
     if show_branch_toggle {
@@ -663,18 +584,12 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             BranchMode::Existing => "Existing",
         };
         let toggle_line = picker_row("Branch", mode_label, is_toggle);
-        Paragraph::new(toggle_line).render(chunks[5], buf);
+        Paragraph::new(toggle_line).render(chunks[2], buf);
     }
 
     // --- Source or branch list ---
-    let list_slot = chunks[6];
+    let list_area = chunks[4];
     if show_gitlab_source {
-        let source_chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(sizing.list_height),
-        ])
-        .split(list_slot);
-
         let is_search = matches!(focus, NewAgentFocus::Search);
         let search_value = if source_query.is_empty() {
             match source {
@@ -686,9 +601,8 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             source_query.as_str()
         };
         let search_line = picker_row("Search", search_value, is_search);
-        Paragraph::new(search_line).render(source_chunks[0], buf);
+        Paragraph::new(search_line).render(chunks[3], buf);
 
-        let list_area = source_chunks[1];
         let all_lines = match source {
             NewAgentSource::Issue => {
                 filtered_issue_lines(issues, source_query, *source_index, label_w)
@@ -712,26 +626,23 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             NewAgentSource::Branch => None,
         };
         render_selectable_list(all_lines, selected_pos, list_area, buf);
+    } else if active_list.is_empty() {
+        let empty_msg = match branch_mode {
+            BranchMode::New => "loading...",
+            BranchMode::Existing => "no existing branches",
+        };
+        Paragraph::new(remote_status_line(empty_msg, label_w)).render(list_area, buf);
     } else {
-        let list_area = list_slot;
-        if active_list.is_empty() {
-            let empty_msg = match branch_mode {
-                BranchMode::New => "loading...",
-                BranchMode::Existing => "no existing branches",
-            };
-            Paragraph::new(remote_status_line(empty_msg, label_w)).render(list_area, buf);
-        } else {
-            let lines = active_list
-                .iter()
-                .enumerate()
-                .map(|(i, b)| selectable_source_line(b.clone(), i == *base_index, label_w))
-                .collect();
-            render_selectable_list(lines, Some(*base_index), list_area, buf);
-        }
+        let lines = active_list
+            .iter()
+            .enumerate()
+            .map(|(i, b)| selectable_source_line(b.clone(), i == *base_index, label_w))
+            .collect();
+        render_selectable_list(lines, Some(*base_index), list_area, buf);
     }
 
     // --- Name row ---
-    let name_value_width = chunks[8]
+    let name_value_width = chunks[6]
         .width
         .saturating_sub(label_w)
         .max(1)
@@ -757,7 +668,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
             name_display,
         ]);
-        Paragraph::new(name_line).render(chunks[8], buf);
+        Paragraph::new(name_line).render(chunks[6], buf);
     } else if show_issue_name {
         let name = truncate_middle(branch_name, name_value_width);
         let name_line = Line::from(vec![
@@ -765,15 +676,22 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
             Span::styled(name, Style::default().fg(TEXT)),
         ]);
-        Paragraph::new(name_line).render(chunks[8], buf);
+        Paragraph::new(name_line).render(chunks[6], buf);
     }
 
     // --- Prompt tabs ---
     let prompt_label = prompt_tabs_row(*prompt_mode, is_prompt, label_w);
-    Paragraph::new(prompt_label).render(chunks[9], buf);
+    Paragraph::new(prompt_label).render(chunks[7], buf);
 
     // --- Prompt area ---
-    let prompt_area = chunks[10];
+    // chunks[8] uses `Min(1)` so the constraint solver may hand it more than
+    // `PROMPT_BODY_HEIGHT` rows when there's slack. Clamp the rendered rect
+    // so the body never visually exceeds 3 rows; the leftover slack reads as
+    // breathing room above the agent row.
+    let prompt_area = Rect {
+        height: chunks[8].height.min(PROMPT_BODY_HEIGHT),
+        ..chunks[8]
+    };
     if !is_prompt {
         let summary = prompt_summary(
             *source,
@@ -829,7 +747,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         is_agent,
         label_w,
     );
-    Paragraph::new(agent_line).render(chunks[12], buf);
+    Paragraph::new(agent_line).render(chunks[10], buf);
 
     // --- Hint bar ---
     let hint_line = match focus {
@@ -859,7 +777,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     // Indent the hint line under the form's value column for visual continuity.
     let mut spans = vec![Span::raw(" ".repeat(label_w as usize))];
     spans.extend(hint_line.spans);
-    Paragraph::new(Line::from(spans)).render(chunks[13], buf);
+    Paragraph::new(Line::from(spans)).render(chunks[12], buf);
 }
 
 #[cfg(test)]
@@ -1020,33 +938,6 @@ mod tests {
             list_outer_area(Rect::new(2, 3, 80, 6)),
             Rect::new(2, 3, 80, 6)
         );
-    }
-
-    #[test]
-    fn layout_sizing_caps_list_to_one_when_inner_height_is_tight() {
-        let sizing = new_agent_layout_sizing(11, 6, true, false, true, 3);
-
-        assert_eq!(sizing.list_height, 1);
-        assert_eq!(sizing.total_height(), 11);
-        assert_eq!(sizing.optional_spacer_height(), 0);
-    }
-
-    #[test]
-    fn layout_sizing_preserves_required_rows_at_minimum_supported_height() {
-        let sizing = new_agent_layout_sizing(12, 6, true, true, true, 3);
-
-        assert_eq!(sizing.list_height, 1);
-        assert_eq!(sizing.total_height(), 12);
-        assert_eq!(sizing.optional_spacer_height(), 0);
-    }
-
-    #[test]
-    fn layout_sizing_allows_six_list_rows_when_height_is_available() {
-        let sizing = new_agent_layout_sizing(21, 6, true, false, true, 3);
-
-        assert_eq!(sizing.list_height, 6);
-        assert_eq!(sizing.total_height(), 21);
-        assert_eq!(sizing.optional_spacer_height(), 5);
     }
 
     /// Build a minimal `App` whose `mode` is `Mode::NewAgent { .. }`.
