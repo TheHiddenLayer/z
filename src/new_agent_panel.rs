@@ -399,9 +399,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         Constraint::Length(PROMPT_BODY_HEIGHT),                     // 8  Prompt body
         Constraint::Length(1),                                      // 9  Divider 2
         Constraint::Length(1),                                      // 10 Agent
-        Constraint::Length(1),                                      // 11 Divider 3
-        Constraint::Length(1),                                      // 12 Hint
-        Constraint::Min(0),                                         // 13 Trailing slack
+        Constraint::Min(0),                                         // 11 Trailing slack
     ];
 
     let chunks = Layout::vertical(constraints)
@@ -603,10 +601,12 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     // --- Group dividers ---
     render_divider(chunks[5], buf);
     render_divider(chunks[9], buf);
-    render_divider(chunks[11], buf);
+}
 
-    // --- Hint bar ---
-    let hint_line = match focus {
+/// Per-focus hint line for the wizard, surfaced by the global status bar
+/// while `Mode::NewAgent` is active.
+pub(crate) fn wizard_hint(focus: &NewAgentFocus) -> Line<'static> {
+    match focus {
         NewAgentFocus::Source
         | NewAgentFocus::Agent
         | NewAgentFocus::Repo
@@ -629,12 +629,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             ("ctrl+r", "reset"),
             ("esc", "cancel"),
         ]),
-    };
-    let (_l, hint_value) = split_row(chunks[12]);
-    let hint_inner = render_focus_frame(false, hint_value, buf);
-    let mut spans = Vec::new();
-    spans.extend(hint_line.spans);
-    Paragraph::new(Line::from(spans)).render(hint_inner, buf);
+    }
 }
 
 #[cfg(test)]
@@ -925,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn three_group_dividers_render_horizontal_rules() {
+    fn two_group_dividers_render_horizontal_rules() {
         let app = wizard_app();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
@@ -938,7 +933,7 @@ mod tests {
                 divider_rows += 1;
             }
         }
-        assert_eq!(divider_rows, 3, "expected exactly three group dividers");
+        assert_eq!(divider_rows, 2, "expected exactly two group dividers");
     }
 
     #[test]
