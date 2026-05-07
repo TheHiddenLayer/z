@@ -1014,4 +1014,49 @@ mod tests {
             "form rows shifted between focus states; geometry must be fixed"
         );
     }
+
+    #[test]
+    fn collapsed_prompt_summary_renders_in_first_body_row_only() {
+        let mut app = wizard_app();
+        if let Mode::NewAgent {
+            focus,
+            prompt,
+            prompt_mode,
+            ..
+        } = &mut app.mode
+        {
+            *focus = NewAgentFocus::Repo;
+            *prompt = "describe the work".to_string();
+            *prompt_mode = PromptMode::Custom;
+        }
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        NewAgentPanelWidget::new(&app).render(area, &mut buf);
+
+        // Find the prompt body's first row by scanning for the summary text.
+        let mut summary_row = None;
+        for y in 0..area.height {
+            let mut line = String::new();
+            for x in 0..area.width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            if line.contains("describe the work") {
+                summary_row = Some(y);
+                break;
+            }
+        }
+        let row = summary_row.expect("prompt summary row not rendered");
+
+        // The two rows below the summary must be blank.
+        for dy in 1..=2 {
+            let y = row + dy;
+            for x in 0..area.width {
+                assert_eq!(
+                    buf[(x, y)].symbol(),
+                    " ",
+                    "expected blank cell at ({x},{y}); body rows past row 1 must be empty"
+                );
+            }
+        }
+    }
 }
