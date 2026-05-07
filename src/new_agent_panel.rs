@@ -193,14 +193,6 @@ fn tab_value_line(options: &[&str], selected: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-#[cfg(test)]
-fn remote_status_line(message: &str, label_w: u16) -> Line<'static> {
-    Line::from(vec![
-        Span::raw(" ".repeat(label_w as usize)),
-        Span::styled(message.to_string(), Style::default().fg(DIM)),
-    ])
-}
-
 fn render_remote_status(message: &str, area: Rect, buf: &mut Buffer) {
     Paragraph::new(Span::styled(
         message.to_string(),
@@ -286,7 +278,13 @@ fn mr_items(mrs: &RemoteList<GitlabMergeRequest>, query: &str) -> ListPayload {
     }
 }
 
-fn branch_items(branches: &[String]) -> ListPayload {
+fn branch_items(branches: &[String], branch_mode: &BranchMode) -> ListPayload {
+    if branches.is_empty() {
+        return match branch_mode {
+            BranchMode::New => ListPayload::Status("loading...".to_string()),
+            BranchMode::Existing => ListPayload::Status("no existing branches".to_string()),
+        };
+    }
     let labels: Vec<String> = branches.to_vec();
     let indices: Vec<usize> = (0..branches.len()).collect();
     ListPayload::Items { labels, indices }
@@ -454,23 +452,16 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     let payload = match source {
         NewAgentSource::Issue => issue_items(issues, source_query),
         NewAgentSource::Mr => mr_items(mrs, source_query),
-        NewAgentSource::Branch => match (active_list.is_empty(), branch_mode) {
-            (true, BranchMode::New) => ListPayload::Status("loading...".to_string()),
-            (true, BranchMode::Existing) => {
-                ListPayload::Status("no existing branches".to_string())
-            }
-            _ => branch_items(active_list),
-        },
+        NewAgentSource::Branch => branch_items(active_list, branch_mode),
     };
     match payload {
         ListPayload::Status(msg) => render_remote_status(&msg, list_value, buf),
         ListPayload::Items { labels, indices } => {
-            let selected_pos = match source {
-                NewAgentSource::Issue | NewAgentSource::Mr => {
-                    indices.iter().position(|&i| i == *source_index)
-                }
-                NewAgentSource::Branch => Some(*base_index),
+            let target_index = match source {
+                NewAgentSource::Issue | NewAgentSource::Mr => *source_index,
+                NewAgentSource::Branch => *base_index,
             };
+            let selected_pos = indices.iter().position(|&i| i == target_index);
             let items: Vec<ListItem> = labels.into_iter().map(ListItem::new).collect();
             let list = List::new(items)
                 .style(Style::default().fg(DIM))
@@ -615,13 +606,6 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
 mod tests {
     use super::*;
 
-    fn line_text(line: &Line<'_>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect()
-    }
-
     fn issue(iid: u64, title: &str) -> GitlabIssue {
         GitlabIssue {
             iid,
@@ -712,13 +696,6 @@ mod tests {
             ListPayload::Status(msg) => assert_eq!(msg, "no matching MRs"),
             _ => panic!("expected Status"),
         }
-    }
-
-    #[test]
-    fn remote_status_line_is_indented() {
-        let line = remote_status_line("loading assigned issues...", 3);
-
-        assert_eq!(line_text(&line), "   loading assigned issues...");
     }
 
     #[test]
