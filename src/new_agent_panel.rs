@@ -171,6 +171,17 @@ fn focus_block(focused: bool) -> Block<'static> {
     }
 }
 
+/// Renders the focus frame (accent bar or left padding) into `area` and
+/// returns the inner rect callers should draw their content into. Centralizes
+/// the three-step `block.inner` / `block.render` ritual so a new row can't
+/// silently drop the accent bar by forgetting one of the steps.
+fn render_focus_frame(focused: bool, area: Rect, buf: &mut Buffer) -> Rect {
+    let block = focus_block(focused);
+    let inner = block.inner(area);
+    block.render(area, buf);
+    inner
+}
+
 fn render_value(text: &str, focused: bool, area: Rect, buf: &mut Buffer) {
     let style = if focused {
         Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
@@ -397,9 +408,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     let is_repo = matches!(focus, NewAgentFocus::Repo);
     let (repo_label_rect, repo_value_rect) = split_row(chunks[0]);
     render_label("Repo", is_repo, repo_label_rect, buf);
-    let repo_block = focus_block(is_repo);
-    let repo_inner = repo_block.inner(repo_value_rect);
-    repo_block.render(repo_value_rect, buf);
+    let repo_inner = render_focus_frame(is_repo, repo_value_rect, buf);
     render_value(repo_name, is_repo, repo_inner, buf);
 
     // --- Source row ---
@@ -411,9 +420,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     };
     let (source_label_rect, source_value_rect) = split_row(chunks[1]);
     render_label("Source", is_source, source_label_rect, buf);
-    let source_block = focus_block(is_source);
-    let source_inner = source_block.inner(source_value_rect);
-    source_block.render(source_value_rect, buf);
+    let source_inner = render_focus_frame(is_source, source_value_rect, buf);
     Paragraph::new(tab_value_line(
         &["issue", "mr", "branch"],
         source_selected,
@@ -429,9 +436,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         };
         let (toggle_label_rect, toggle_value_rect) = split_row(chunks[2]);
         render_label("Branch", is_toggle, toggle_label_rect, buf);
-        let toggle_block = focus_block(is_toggle);
-        let toggle_inner = toggle_block.inner(toggle_value_rect);
-        toggle_block.render(toggle_value_rect, buf);
+        let toggle_inner = render_focus_frame(is_toggle, toggle_value_rect, buf);
         render_value(mode_label, is_toggle, toggle_inner, buf);
     }
 
@@ -456,9 +461,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             };
             (source_query.clone(), style)
         };
-        let search_block = focus_block(is_search);
-        let search_inner = search_block.inner(search_value_rect);
-        search_block.render(search_value_rect, buf);
+        let search_inner = render_focus_frame(is_search, search_value_rect, buf);
         Paragraph::new(Span::styled(search_value_text, search_value_style))
             .render(search_inner, buf);
     }
@@ -468,9 +471,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         focus,
         NewAgentFocus::SourceList | NewAgentFocus::BranchList
     );
-    let list_block = focus_block(list_focused);
-    let list_inner = list_block.inner(list_value);
-    list_block.render(list_value, buf);
+    let list_inner = render_focus_frame(list_focused, list_value, buf);
     let payload = match source {
         NewAgentSource::Issue => issue_items(issues, source_query),
         NewAgentSource::Mr => mr_items(mrs, source_query),
@@ -496,18 +497,12 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     }
 
     // --- Name row ---
-    let name_value_width = chunks[6]
-        .width
-        .saturating_sub(label_w)
-        .max(1)
-        .min(MAX_TASK_NAME_WIDTH) as usize;
     if show_name {
         let is_name = matches!(focus, NewAgentFocus::Name);
         let (name_label_rect, name_value_rect) = split_row(chunks[6]);
         render_label("Name", is_name, name_label_rect, buf);
-        let name_block = focus_block(is_name);
-        let name_inner = name_block.inner(name_value_rect);
-        name_block.render(name_value_rect, buf);
+        let name_inner = render_focus_frame(is_name, name_value_rect, buf);
+        let name_value_width = (name_inner.width as usize).max(1).min(MAX_TASK_NAME_WIDTH as usize);
         let name_display = if is_name && *name_pristine {
             // Pristine auto-suggested name: dim + italic so it reads as a
             // placeholder that will be replaced the moment the user types.
@@ -531,9 +526,8 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     } else if show_issue_name {
         let (name_label_rect, name_value_rect) = split_row(chunks[6]);
         render_label("Name", false, name_label_rect, buf);
-        let name_block = focus_block(false);
-        let name_inner = name_block.inner(name_value_rect);
-        name_block.render(name_value_rect, buf);
+        let name_inner = render_focus_frame(false, name_value_rect, buf);
+        let name_value_width = (name_inner.width as usize).max(1).min(MAX_TASK_NAME_WIDTH as usize);
         let name = truncate_middle(branch_name, name_value_width);
         Paragraph::new(Span::styled(name, Style::default().fg(TEXT))).render(name_inner, buf);
     }
@@ -545,9 +539,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     };
     let (prompt_label_rect, prompt_value_rect) = split_row(chunks[7]);
     render_label("Prompt", is_prompt, prompt_label_rect, buf);
-    let prompt_label_block = focus_block(is_prompt);
-    let prompt_label_inner = prompt_label_block.inner(prompt_value_rect);
-    prompt_label_block.render(prompt_value_rect, buf);
+    let prompt_label_inner = render_focus_frame(is_prompt, prompt_value_rect, buf);
     Paragraph::new(tab_value_line(&["default", "custom"], prompt_selected))
         .render(prompt_label_inner, buf);
 
@@ -555,9 +547,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     // chunks[8] is exactly `PROMPT_BODY_HEIGHT` rows; trailing slack is
     // absorbed by the synthetic `Min(0)` row at the bottom of the layout.
     let (_label, body_rect) = split_row(chunks[8]);
-    let body_block = focus_block(is_prompt);
-    let body_inner = body_block.inner(body_rect);
-    body_block.render(body_rect, buf);
+    let body_inner = render_focus_frame(is_prompt, body_rect, buf);
     if !is_prompt {
         let summary = prompt_summary(*source, *prompt_mode, prompt, body_inner.width);
         Paragraph::new(Span::styled(summary, Style::default().fg(DIM)))
@@ -601,9 +591,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         .unwrap_or(0);
     let (agent_label_rect, agent_value_rect) = split_row(chunks[10]);
     render_label("Agent", is_agent, agent_label_rect, buf);
-    let agent_block = focus_block(is_agent);
-    let agent_inner = agent_block.inner(agent_value_rect);
-    agent_block.render(agent_value_rect, buf);
+    let agent_inner = render_focus_frame(is_agent, agent_value_rect, buf);
     Paragraph::new(tab_value_line(&agent_options, agent_selected))
         .render(agent_inner, buf);
 
@@ -632,8 +620,11 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             ("esc", "cancel"),
         ]),
     };
-    // Indent the hint line under the form's value column for visual continuity.
-    let mut spans = vec![Span::raw(" ".repeat(label_w as usize))];
+    // Indent the hint line under the form's value column for visual
+    // continuity. The 2-col bump past `label_w` matches the inner offset every
+    // other row picks up from `focus_block` (1-col border + 1-col padding when
+    // focused; 2-col padding when unfocused).
+    let mut spans = vec![Span::raw(" ".repeat(label_w as usize + 2))];
     spans.extend(hint_line.spans);
     Paragraph::new(Line::from(spans)).render(chunks[12], buf);
 }
