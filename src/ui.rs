@@ -712,7 +712,11 @@ mod tests {
     }
 
     #[test]
-    fn branch_wizard_keeps_agent_near_prompt_when_prompt_unfocused() {
+    fn branch_wizard_locks_prompt_body_to_three_rows_when_unfocused() {
+        // The wizard's prompt body is fixed at PROMPT_BODY_HEIGHT (3) rows
+        // regardless of focus, per the layout-redesign spec. The agent row
+        // therefore lands exactly 4 rows below the prompt-label row:
+        //   prompt label (1) + prompt body (3) = 4.
         let app = branch_source_app();
         let text = render_app(&app);
         let lines: Vec<&str> = text.lines().collect();
@@ -725,9 +729,10 @@ mod tests {
             .position(|line| line.contains("Agent"))
             .expect(&text);
 
-        assert!(
-            agent_row.saturating_sub(prompt_row) <= 3,
-            "agent should stay visually attached to prompt controls:\n{text}"
+        assert_eq!(
+            agent_row.saturating_sub(prompt_row),
+            4,
+            "prompt body should always reserve 3 rows; agent must sit 4 rows below the prompt label:\n{text}"
         );
     }
 
