@@ -1048,4 +1048,83 @@ mod tests {
         assert_eq!(sizing.total_height(), 21);
         assert_eq!(sizing.optional_spacer_height(), 5);
     }
+
+    /// Build a minimal `App` whose `mode` is `Mode::NewAgent { .. }`.
+    ///
+    /// Mirrors `app::tests::test_app_in_new_agent_mode`, but kept self-contained
+    /// here because that helper lives in a private `#[cfg(test)] mod tests`
+    /// inside `app.rs` and isn't reachable from another module's tests.
+    fn wizard_app() -> App {
+        let toml_str = r#"repos = ["~/src/myapp"]"#;
+        let config = crate::config::Config::from_toml_str(toml_str).unwrap();
+        let mut app = App::new(config);
+        app.mode = Mode::NewAgent {
+            repo_index: 0,
+            source: NewAgentSource::Branch,
+            source_query: String::new(),
+            source_index: 0,
+            issues: RemoteList::Idle,
+            mrs: RemoteList::Idle,
+            selected_issue: None,
+            selected_mr: None,
+            branch_mode: BranchMode::New,
+            prompt: String::new(),
+            prompt_mode: PromptMode::Custom,
+            focus: NewAgentFocus::Prompt,
+            base_index: 0,
+            branches: vec!["main".into()],
+            existing_branches: Vec::new(),
+            branch_name: "z-0409-1".into(),
+            name_pristine: true,
+            agent_name: "codex".to_string(),
+        };
+        app
+    }
+
+    fn render_with_focus(focus: NewAgentFocus, area: Rect) -> Buffer {
+        // `App` isn't `Clone` (Config and several inner types don't derive it),
+        // so build a fresh wizard app per call instead of cloning.
+        let mut app = wizard_app();
+        if let Mode::NewAgent { focus: f, .. } = &mut app.mode {
+            *f = focus;
+        }
+        let mut buf = Buffer::empty(area);
+        NewAgentPanelWidget::new(&app).render(area, &mut buf);
+        buf
+    }
+
+    fn cells_outside_columns(buf: &Buffer, skip_cols: std::ops::Range<u16>) -> Vec<(u16, u16, String)> {
+        let mut out = Vec::new();
+        let area = *buf.area();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if skip_cols.contains(&x) {
+                    continue;
+                }
+                let cell = &buf[(x, y)];
+                out.push((x, y, cell.symbol().to_string()));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn focus_changes_do_not_move_form_rows() {
+        let area = Rect::new(0, 0, 80, 24);
+
+        let on_repo = render_with_focus(NewAgentFocus::Repo, area);
+        let on_prompt = render_with_focus(NewAgentFocus::Prompt, area);
+
+        // The focus accent bar plus the value column may legitimately differ.
+        // Everything in columns 0..NEW_AGENT_LABEL_W (label column) must be
+        // identical. (Task 2 will introduce `LABEL_W`; until then we pin
+        // against the existing constant.)
+        let a = cells_outside_columns(&on_repo, 0..NEW_AGENT_LABEL_W);
+        let b = cells_outside_columns(&on_prompt, 0..NEW_AGENT_LABEL_W);
+
+        assert_eq!(
+            a, b,
+            "form rows shifted between focus states; geometry must be fixed"
+        );
+    }
 }
