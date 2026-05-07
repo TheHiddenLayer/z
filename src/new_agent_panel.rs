@@ -36,111 +36,13 @@ impl Widget for &NewAgentPanelWidget<'_> {
     }
 }
 
+#[cfg(test)]
 fn source_label(source: NewAgentSource) -> &'static str {
     match source {
         NewAgentSource::Issue => "issue",
         NewAgentSource::Mr => "mr",
         NewAgentSource::Branch => "branch",
     }
-}
-
-fn source_tabs_row(source: NewAgentSource, focused: bool, label_w: u16) -> Line<'static> {
-    let label_style = if focused {
-        Style::default().fg(TEXT)
-    } else {
-        Style::default().fg(DIM)
-    };
-    let selected_style = Style::default().fg(TEXT).add_modifier(Modifier::BOLD);
-    let inactive_style = Style::default().fg(DIM);
-    let label = "Source";
-    // Label column is fixed-width (`label_w`). Two leading spaces reserve the
-    // focus-accent gutter that Task 8 will draw via `Borders::LEFT`; keeping
-    // them constant makes row geometry stable across focus changes.
-    let label_padding = (label_w as usize).saturating_sub(label.len() + 2);
-
-    let mut spans = vec![
-        Span::raw("  ".to_string()),
-        Span::styled(label.to_string(), label_style),
-        Span::raw(" ".repeat(label_padding)),
-    ];
-    for (index, candidate) in [
-        NewAgentSource::Issue,
-        NewAgentSource::Mr,
-        NewAgentSource::Branch,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if index > 0 {
-            spans.push(Span::styled("  ", Style::default().fg(DIM)));
-        }
-        let style = if candidate == source {
-            selected_style
-        } else {
-            inactive_style
-        };
-        spans.push(Span::styled(source_label(candidate).to_string(), style));
-    }
-    Line::from(spans)
-}
-
-fn tabbed_row(
-    label: &str,
-    options: &[&str],
-    selected: usize,
-    focused: bool,
-    label_w: u16,
-) -> Line<'static> {
-    let label_style = if focused {
-        Style::default().fg(TEXT)
-    } else {
-        Style::default().fg(DIM)
-    };
-    let selected_style = Style::default().fg(TEXT).add_modifier(Modifier::BOLD);
-    let inactive_style = Style::default().fg(DIM);
-    // Two leading spaces reserve the focus-accent gutter for Task 8.
-    let label_padding = (label_w as usize).saturating_sub(label.len() + 2);
-
-    let mut spans = vec![
-        Span::raw("  ".to_string()),
-        Span::styled(label.to_string(), label_style),
-        Span::raw(" ".repeat(label_padding)),
-    ];
-    for (index, option) in options.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled("  ", Style::default().fg(DIM)));
-        }
-        let style = if index == selected {
-            selected_style
-        } else {
-            inactive_style
-        };
-        spans.push(Span::styled((*option).to_string(), style));
-    }
-    Line::from(spans)
-}
-
-fn prompt_tabs_row(prompt_mode: PromptMode, focused: bool, label_w: u16) -> Line<'static> {
-    let selected = if matches!(prompt_mode, PromptMode::Generated) {
-        0
-    } else {
-        1
-    };
-    tabbed_row("Prompt", &["default", "custom"], selected, focused, label_w)
-}
-
-fn agent_tabs_row<'a>(
-    agent_names: impl Iterator<Item = &'a str>,
-    selected_name: &str,
-    focused: bool,
-    label_w: u16,
-) -> Line<'static> {
-    let options: Vec<&str> = agent_names.collect();
-    let selected = options
-        .iter()
-        .position(|name| *name == selected_name)
-        .unwrap_or(0);
-    tabbed_row("Agent", &options, selected, focused, label_w)
 }
 
 fn prompt_summary(
@@ -226,6 +128,49 @@ fn truncate_middle(s: &str, max_width: usize) -> String {
     let prefix = take_prefix_width(s, prefix_width);
     let suffix = take_suffix_width(s, suffix_width);
     format!("{prefix}...{suffix}")
+}
+
+fn split_row(row: Rect) -> (Rect, Rect) {
+    let [label, value] =
+        Layout::horizontal([Constraint::Length(LABEL_W), Constraint::Min(0)]).areas(row);
+    (label, value)
+}
+
+fn render_label(text: &str, focused: bool, area: Rect, buf: &mut Buffer) {
+    let style = if focused {
+        Style::default().fg(TEXT)
+    } else {
+        Style::default().fg(DIM)
+    };
+    // Two leading spaces reserve the focus-accent gutter that Task 8 will
+    // draw via `Borders::LEFT`. Keeping them constant preserves visual
+    // equivalence with the prior hand-rolled label column geometry.
+    Paragraph::new(Span::styled(format!("  {text}"), style)).render(area, buf);
+}
+
+fn render_value(text: &str, focused: bool, area: Rect, buf: &mut Buffer) {
+    let style = if focused {
+        Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(TEXT)
+    };
+    Paragraph::new(Span::styled(text.to_string(), style)).render(area, buf);
+}
+
+fn tab_value_line(options: &[&str], selected: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, opt) in options.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default().fg(DIM)));
+        }
+        let style = if i == selected {
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(DIM)
+        };
+        spans.push(Span::styled((*opt).to_string(), style));
+    }
+    Line::from(spans)
 }
 
 fn remote_status_line(message: &str, label_w: u16) -> Line<'static> {
@@ -523,59 +468,26 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         .spacing(0)
         .split(inner);
 
-    let label_style = |focused: bool| {
-        if focused {
-            Style::default().fg(TEXT)
-        } else {
-            Style::default().fg(DIM)
-        }
-    };
-    let val_style = |focused: bool| {
-        if focused {
-            Style::default().fg(TEXT)
-        } else {
-            Style::default().fg(DIM)
-        }
-    };
-
-    // Picker row: "  Label    value". Focus is conveyed by row brightness
-    // contrast (focused rows TEXT, unfocused DIM) plus value-span boldness.
-    // The focus accent bar will be reintroduced in Task 8 via `Borders::LEFT`
-    // on the value sub-rect — keeping the label column geometry stable here
-    // is what lets `focus_changes_do_not_move_form_rows` hold.
-    let picker_row = |label: &str, value: &str, focused: bool| -> Line<'static> {
-        let row_style = if focused {
-            Style::default().fg(TEXT)
-        } else {
-            Style::default().fg(DIM)
-        };
-        let label_style = row_style;
-        let value_style = if focused {
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(TEXT)
-        };
-        let label_field_w = label_w as usize;
-        // Two leading spaces reserve the focus-accent gutter; value starts at
-        // column `label_w`.
-        let label_padding = label_field_w.saturating_sub(label.len() + 2);
-        Line::from(vec![
-            Span::raw("  ".to_string()),
-            Span::styled(label.to_string(), label_style),
-            Span::raw(" ".repeat(label_padding)),
-            Span::styled(value.to_string(), value_style),
-        ])
-    };
-
     // --- Repo row ---
     let is_repo = matches!(focus, NewAgentFocus::Repo);
-    let repo_line = picker_row("Repo", repo_name, is_repo);
-    Paragraph::new(repo_line).render(chunks[0], buf);
+    let (repo_label_rect, repo_value_rect) = split_row(chunks[0]);
+    render_label("Repo", is_repo, repo_label_rect, buf);
+    render_value(repo_name, is_repo, repo_value_rect, buf);
 
     // --- Source row ---
     let is_source = matches!(focus, NewAgentFocus::Source);
-    let source_line = source_tabs_row(*source, is_source, label_w);
-    Paragraph::new(source_line).render(chunks[1], buf);
+    let source_selected = match source {
+        NewAgentSource::Issue => 0,
+        NewAgentSource::Mr => 1,
+        NewAgentSource::Branch => 2,
+    };
+    let (source_label_rect, source_value_rect) = split_row(chunks[1]);
+    render_label("Source", is_source, source_label_rect, buf);
+    Paragraph::new(tab_value_line(
+        &["issue", "mr", "branch"],
+        source_selected,
+    ))
+    .render(source_value_rect, buf);
 
     // --- Branch toggle row ---
     if show_branch_toggle {
@@ -584,25 +496,34 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             BranchMode::New => "New",
             BranchMode::Existing => "Existing",
         };
-        let toggle_line = picker_row("Branch", mode_label, is_toggle);
-        Paragraph::new(toggle_line).render(chunks[2], buf);
+        let (toggle_label_rect, toggle_value_rect) = split_row(chunks[2]);
+        render_label("Branch", is_toggle, toggle_label_rect, buf);
+        render_value(mode_label, is_toggle, toggle_value_rect, buf);
     }
 
     // --- Source or branch list ---
     let list_area = chunks[4];
     if show_gitlab_source {
         let is_search = matches!(focus, NewAgentFocus::Search);
-        let search_value = if source_query.is_empty() {
-            match source {
+        let (search_label_rect, search_value_rect) = split_row(chunks[3]);
+        render_label("Search", is_search, search_label_rect, buf);
+        let (search_value_text, search_value_style) = if source_query.is_empty() {
+            let placeholder = match source {
                 NewAgentSource::Issue => "filter issues...",
                 NewAgentSource::Mr => "filter MRs...",
                 NewAgentSource::Branch => "",
-            }
+            };
+            (placeholder.to_string(), Style::default().fg(DIM))
         } else {
-            source_query.as_str()
+            let style = if is_search {
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT)
+            };
+            (source_query.clone(), style)
         };
-        let search_line = picker_row("Search", search_value, is_search);
-        Paragraph::new(search_line).render(chunks[3], buf);
+        Paragraph::new(Span::styled(search_value_text, search_value_style))
+            .render(search_value_rect, buf);
 
         let all_lines = match source {
             NewAgentSource::Issue => {
@@ -650,6 +571,8 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         .min(MAX_TASK_NAME_WIDTH) as usize;
     if show_name {
         let is_name = matches!(focus, NewAgentFocus::Name);
+        let (name_label_rect, name_value_rect) = split_row(chunks[6]);
+        render_label("Name", is_name, name_label_rect, buf);
         let name_display = if is_name && *name_pristine {
             // Pristine auto-suggested name: dim + italic so it reads as a
             // placeholder that will be replaced the moment the user types.
@@ -662,27 +585,31 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             let cursor = if is_name { "_" } else { "" };
             let max_width = name_value_width.saturating_sub(cursor.len());
             let name = truncate_middle(branch_name, max_width);
-            Span::styled(format!("{name}{cursor}"), val_style(is_name))
+            let style = if is_name {
+                Style::default().fg(TEXT)
+            } else {
+                Style::default().fg(DIM)
+            };
+            Span::styled(format!("{name}{cursor}"), style)
         };
-        let name_line = Line::from(vec![
-            Span::styled("  Name", label_style(is_name)),
-            Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
-            name_display,
-        ]);
-        Paragraph::new(name_line).render(chunks[6], buf);
+        Paragraph::new(Line::from(name_display)).render(name_value_rect, buf);
     } else if show_issue_name {
+        let (name_label_rect, name_value_rect) = split_row(chunks[6]);
+        render_label("Name", false, name_label_rect, buf);
         let name = truncate_middle(branch_name, name_value_width);
-        let name_line = Line::from(vec![
-            Span::styled("  Name", Style::default().fg(DIM)),
-            Span::raw(" ".repeat((label_w as usize).saturating_sub(6))),
-            Span::styled(name, Style::default().fg(TEXT)),
-        ]);
-        Paragraph::new(name_line).render(chunks[6], buf);
+        Paragraph::new(Span::styled(name, Style::default().fg(TEXT)))
+            .render(name_value_rect, buf);
     }
 
     // --- Prompt tabs ---
-    let prompt_label = prompt_tabs_row(*prompt_mode, is_prompt, label_w);
-    Paragraph::new(prompt_label).render(chunks[7], buf);
+    let prompt_selected = match prompt_mode {
+        PromptMode::Generated => 0,
+        PromptMode::Custom => 1,
+    };
+    let (prompt_label_rect, prompt_value_rect) = split_row(chunks[7]);
+    render_label("Prompt", is_prompt, prompt_label_rect, buf);
+    Paragraph::new(tab_value_line(&["default", "custom"], prompt_selected))
+        .render(prompt_value_rect, buf);
 
     // --- Prompt area ---
     // chunks[8] is exactly `PROMPT_BODY_HEIGHT` rows; trailing slack is
@@ -737,13 +664,20 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
 
     // --- Agent tabs ---
     let is_agent = matches!(focus, NewAgentFocus::Agent);
-    let agent_line = agent_tabs_row(
-        app.config.agents.iter().map(|(name, _)| name.as_str()),
-        agent_name,
-        is_agent,
-        label_w,
-    );
-    Paragraph::new(agent_line).render(chunks[10], buf);
+    let agent_options: Vec<&str> = app
+        .config
+        .agents
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let agent_selected = agent_options
+        .iter()
+        .position(|name| *name == agent_name)
+        .unwrap_or(0);
+    let (agent_label_rect, agent_value_rect) = split_row(chunks[10]);
+    render_label("Agent", is_agent, agent_label_rect, buf);
+    Paragraph::new(tab_value_line(&agent_options, agent_selected))
+        .render(agent_value_rect, buf);
 
     // --- Hint bar ---
     let hint_line = match focus {
