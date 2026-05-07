@@ -7,7 +7,8 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        HighlightSpacing, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap,
+        Block, Borders, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph,
+        StatefulWidget, Widget, Wrap,
     },
 };
 
@@ -148,24 +149,26 @@ fn split_row(row: Rect) -> (Rect, Rect) {
     (label, value)
 }
 
-// `render_label` prepends a 2-col gutter so the label starts at column 2.
-// This reserves space for the focus accent bar that Task 8 will draw via
-// `Borders::LEFT` on the focused row's value sub-rect; until then, every row
-// gets the same indent so widths stay constant. The prefix is also relied on
-// by `ui.rs` snapshot tests (`new_agent_wizard_renders_source_tabs`,
-// `new_agent_wizard_orders_primary_controls`,
-// `new_agent_wizard_renders_prompt_and_agent_tabs`,
-// `generated_prompt_is_collapsed_until_prompt_focus`) which assert literal
-// strings like `"Repo        myapp"` and `"Source      issue  mr  branch"`.
-// Task 8 must remove this `format!` and replace it with the bordered block,
-// updating those snapshot tests in lockstep.
 fn render_label(text: &str, focused: bool, area: Rect, buf: &mut Buffer) {
     let style = if focused {
         Style::default().fg(TEXT)
     } else {
         Style::default().fg(DIM)
     };
-    Paragraph::new(Span::styled(format!("  {text}"), style)).render(area, buf);
+    Paragraph::new(Span::styled(text.to_string(), style)).render(area, buf);
+}
+
+/// Wraps a row's value sub-rect with a focus accent bar on focus, or a 2-col
+/// left padding when unfocused, so content lands at the same column either way.
+fn focus_block(focused: bool) -> Block<'static> {
+    if focused {
+        Block::new()
+            .borders(Borders::LEFT)
+            .border_style(Style::default().fg(TEXT))
+            .padding(Padding::horizontal(1))
+    } else {
+        Block::new().padding(Padding::left(2))
+    }
 }
 
 fn render_value(text: &str, focused: bool, area: Rect, buf: &mut Buffer) {
@@ -394,7 +397,10 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     let is_repo = matches!(focus, NewAgentFocus::Repo);
     let (repo_label_rect, repo_value_rect) = split_row(chunks[0]);
     render_label("Repo", is_repo, repo_label_rect, buf);
-    render_value(repo_name, is_repo, repo_value_rect, buf);
+    let repo_block = focus_block(is_repo);
+    let repo_inner = repo_block.inner(repo_value_rect);
+    repo_block.render(repo_value_rect, buf);
+    render_value(repo_name, is_repo, repo_inner, buf);
 
     // --- Source row ---
     let is_source = matches!(focus, NewAgentFocus::Source);
@@ -405,11 +411,14 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     };
     let (source_label_rect, source_value_rect) = split_row(chunks[1]);
     render_label("Source", is_source, source_label_rect, buf);
+    let source_block = focus_block(is_source);
+    let source_inner = source_block.inner(source_value_rect);
+    source_block.render(source_value_rect, buf);
     Paragraph::new(tab_value_line(
         &["issue", "mr", "branch"],
         source_selected,
     ))
-    .render(source_value_rect, buf);
+    .render(source_inner, buf);
 
     // --- Branch toggle row ---
     if show_branch_toggle {
@@ -420,7 +429,10 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         };
         let (toggle_label_rect, toggle_value_rect) = split_row(chunks[2]);
         render_label("Branch", is_toggle, toggle_label_rect, buf);
-        render_value(mode_label, is_toggle, toggle_value_rect, buf);
+        let toggle_block = focus_block(is_toggle);
+        let toggle_inner = toggle_block.inner(toggle_value_rect);
+        toggle_block.render(toggle_value_rect, buf);
+        render_value(mode_label, is_toggle, toggle_inner, buf);
     }
 
     // --- Source or branch list ---
@@ -444,18 +456,28 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             };
             (source_query.clone(), style)
         };
+        let search_block = focus_block(is_search);
+        let search_inner = search_block.inner(search_value_rect);
+        search_block.render(search_value_rect, buf);
         Paragraph::new(Span::styled(search_value_text, search_value_style))
-            .render(search_value_rect, buf);
+            .render(search_inner, buf);
     }
 
     let (_l, list_value) = split_row(list_area);
+    let list_focused = matches!(
+        focus,
+        NewAgentFocus::SourceList | NewAgentFocus::BranchList
+    );
+    let list_block = focus_block(list_focused);
+    let list_inner = list_block.inner(list_value);
+    list_block.render(list_value, buf);
     let payload = match source {
         NewAgentSource::Issue => issue_items(issues, source_query),
         NewAgentSource::Mr => mr_items(mrs, source_query),
         NewAgentSource::Branch => branch_items(active_list, branch_mode),
     };
     match payload {
-        ListPayload::Status(msg) => render_remote_status(&msg, list_value, buf),
+        ListPayload::Status(msg) => render_remote_status(&msg, list_inner, buf),
         ListPayload::Items { labels, indices } => {
             let target_index = match source {
                 NewAgentSource::Issue | NewAgentSource::Mr => *source_index,
@@ -469,7 +491,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
                 .highlight_symbol("\u{258C} ")
                 .highlight_spacing(HighlightSpacing::Always);
             let mut state = ListState::default().with_selected(selected_pos);
-            StatefulWidget::render(list, list_value, buf, &mut state);
+            StatefulWidget::render(list, list_inner, buf, &mut state);
         }
     }
 
@@ -483,6 +505,9 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         let is_name = matches!(focus, NewAgentFocus::Name);
         let (name_label_rect, name_value_rect) = split_row(chunks[6]);
         render_label("Name", is_name, name_label_rect, buf);
+        let name_block = focus_block(is_name);
+        let name_inner = name_block.inner(name_value_rect);
+        name_block.render(name_value_rect, buf);
         let name_display = if is_name && *name_pristine {
             // Pristine auto-suggested name: dim + italic so it reads as a
             // placeholder that will be replaced the moment the user types.
@@ -502,13 +527,15 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             };
             Span::styled(format!("{name}{cursor}"), style)
         };
-        Paragraph::new(Line::from(name_display)).render(name_value_rect, buf);
+        Paragraph::new(Line::from(name_display)).render(name_inner, buf);
     } else if show_issue_name {
         let (name_label_rect, name_value_rect) = split_row(chunks[6]);
         render_label("Name", false, name_label_rect, buf);
+        let name_block = focus_block(false);
+        let name_inner = name_block.inner(name_value_rect);
+        name_block.render(name_value_rect, buf);
         let name = truncate_middle(branch_name, name_value_width);
-        Paragraph::new(Span::styled(name, Style::default().fg(TEXT)))
-            .render(name_value_rect, buf);
+        Paragraph::new(Span::styled(name, Style::default().fg(TEXT))).render(name_inner, buf);
     }
 
     // --- Prompt tabs ---
@@ -518,24 +545,30 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     };
     let (prompt_label_rect, prompt_value_rect) = split_row(chunks[7]);
     render_label("Prompt", is_prompt, prompt_label_rect, buf);
+    let prompt_label_block = focus_block(is_prompt);
+    let prompt_label_inner = prompt_label_block.inner(prompt_value_rect);
+    prompt_label_block.render(prompt_value_rect, buf);
     Paragraph::new(tab_value_line(&["default", "custom"], prompt_selected))
-        .render(prompt_value_rect, buf);
+        .render(prompt_label_inner, buf);
 
     // --- Prompt area ---
     // chunks[8] is exactly `PROMPT_BODY_HEIGHT` rows; trailing slack is
     // absorbed by the synthetic `Min(0)` row at the bottom of the layout.
     let (_label, body_rect) = split_row(chunks[8]);
+    let body_block = focus_block(is_prompt);
+    let body_inner = body_block.inner(body_rect);
+    body_block.render(body_rect, buf);
     if !is_prompt {
-        let summary = prompt_summary(*source, *prompt_mode, prompt, body_rect.width);
+        let summary = prompt_summary(*source, *prompt_mode, prompt, body_inner.width);
         Paragraph::new(Span::styled(summary, Style::default().fg(DIM)))
-            .render(body_rect, buf);
+            .render(body_inner, buf);
     } else if prompt.is_empty() {
         let placeholder = Span::styled("_", Style::default().fg(TEXT));
-        Paragraph::new(placeholder).render(body_rect, buf);
+        Paragraph::new(placeholder).render(body_inner, buf);
     } else {
         let cursor = "_";
         let text = format!("{prompt}{cursor}");
-        let width = body_rect.width.max(1) as usize;
+        let width = body_inner.width.max(1) as usize;
         let line_count: u16 = text
             .split('\n')
             .map(|l| {
@@ -546,12 +579,12 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
                 }
             })
             .sum();
-        let scroll = line_count.saturating_sub(body_rect.height);
+        let scroll = line_count.saturating_sub(body_inner.height);
         Paragraph::new(text)
             .style(Style::default().fg(TEXT))
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0))
-            .render(body_rect, buf);
+            .render(body_inner, buf);
     }
 
     // --- Agent tabs ---
@@ -568,8 +601,11 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         .unwrap_or(0);
     let (agent_label_rect, agent_value_rect) = split_row(chunks[10]);
     render_label("Agent", is_agent, agent_label_rect, buf);
+    let agent_block = focus_block(is_agent);
+    let agent_inner = agent_block.inner(agent_value_rect);
+    agent_block.render(agent_value_rect, buf);
     Paragraph::new(tab_value_line(&agent_options, agent_selected))
-        .render(agent_value_rect, buf);
+        .render(agent_inner, buf);
 
     // --- Hint bar ---
     let hint_line = match focus {
@@ -870,6 +906,8 @@ mod tests {
                 line.push_str(buf[(x, y)].symbol());
             }
             if line.contains("describe the work") {
+                let col = line.find("describe the work").unwrap() as u16;
+                assert_eq!(col, LABEL_W + 2, "prompt summary column drift");
                 summary_row = Some(y);
                 break;
             }
@@ -907,10 +945,13 @@ mod tests {
         let mut buf = Buffer::empty(area);
         NewAgentPanelWidget::new(&app).render(area, &mut buf);
 
-        // Find the rows containing the prompt content (start with 'a').
+        // Find the rows containing the prompt content (start with 'a' at the
+        // value column). With the focus accent bar, focused rows render the
+        // `│` glyph at LABEL_W, a padding column at LABEL_W + 1, then content
+        // at LABEL_W + 2.
         let mut content_rows: Vec<u16> = Vec::new();
         for y in 0..area.height {
-            let cell = buf[(LABEL_W, y)].symbol();
+            let cell = buf[(LABEL_W + 2, y)].symbol();
             if cell == "a" {
                 content_rows.push(y);
             }
@@ -921,11 +962,22 @@ mod tests {
             content_rows.len()
         );
 
-        // Every content row must start with 'a' at column LABEL_W (value column),
-        // and column LABEL_W - 1 (label column) must be blank.
         for y in content_rows {
-            assert_eq!(buf[(LABEL_W, y)].symbol(), "a", "value column drift at y={y}");
-            assert_eq!(buf[(LABEL_W - 1, y)].symbol(), " ", "label column non-blank at y={y}");
+            assert_eq!(
+                buf[(LABEL_W, y)].symbol(),
+                "\u{2502}",
+                "focus bar missing at y={y}"
+            );
+            assert_eq!(
+                buf[(LABEL_W + 1, y)].symbol(),
+                " ",
+                "padding column non-blank at y={y}"
+            );
+            assert_eq!(
+                buf[(LABEL_W + 2, y)].symbol(),
+                "a",
+                "value column drift at y={y}"
+            );
         }
     }
 }

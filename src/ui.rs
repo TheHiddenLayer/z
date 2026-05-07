@@ -641,7 +641,7 @@ mod tests {
         let text = render_app(&app);
 
         assert!(
-            text.contains("Source      issue  mr  branch"),
+            text.contains("Source          issue  mr  branch"),
             "source choice should expose all start modes as tabs:\n{text}"
         );
     }
@@ -653,11 +653,14 @@ mod tests {
 
         let text = render_app(&app);
 
-        let repo = text.find("Repo        myapp").expect(&text);
-        let source = text.find("Source      issue  mr  branch").expect(&text);
-        let search = text.find("Search      filter issues...").expect(&text);
-        let prompt = text.find("Prompt      default  custom").expect(&text);
-        let agent = text.find("Agent       claude  codex").expect(&text);
+        // Repo is focused on StartNewAgent → focus accent bar `│` sits at
+        // LABEL_W with one padding column before the value. Other rows are
+        // unfocused → 2 blank padding cols before the value.
+        let repo = text.find("Repo          \u{2502} myapp").expect(&text);
+        let source = text.find("Source          issue  mr  branch").expect(&text);
+        let search = text.find("Search          filter issues...").expect(&text);
+        let prompt = text.find("Prompt          default  custom").expect(&text);
+        let agent = text.find("Agent           claude  codex").expect(&text);
         assert!(
             repo < source && source < search && search < prompt && prompt < agent,
             "wizard controls should be ordered Repo, Source, Search/options, Prompt, Agent:\n{text}"
@@ -672,11 +675,11 @@ mod tests {
         let text = render_app(&app);
 
         assert!(
-            text.contains("Prompt      default  custom"),
+            text.contains("Prompt          default  custom"),
             "prompt mode should render as tabs:\n{text}"
         );
         assert!(
-            text.contains("Agent       claude  codex"),
+            text.contains("Agent           claude  codex"),
             "agent choice should render as tabs:\n{text}"
         );
     }
@@ -698,7 +701,7 @@ mod tests {
         let text = render_app(&app);
 
         assert!(
-            text.contains("Prompt      default  custom"),
+            text.contains("Prompt          default  custom"),
             "wizard should show prompt mode tabs:\n{text}"
         );
         assert!(
