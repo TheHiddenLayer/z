@@ -498,9 +498,9 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     // Row order. `Length(0)` rows render nothing and consume nothing visually.
     // Dividers reserve zero height in this task; Task 9 will switch them to
     // `Length(1)` once their `─` glyph is painted. The list row uses `Max` so
-    // it shrinks gracefully in tight viewports. The prompt body uses `Min(1)`
-    // so the solver hands it leftover space — the renderer only ever writes
-    // into the first `PROMPT_BODY_HEIGHT` rows of that rect.
+    // it shrinks gracefully in tight viewports. The trailing `Min(0)` is the
+    // single explicit slack absorber — every other row carries an exact size,
+    // so a future `Min`/`Max` constraint cannot accidentally split the slack.
     let constraints = [
         Constraint::Length(1),                                      // 0  Repo
         Constraint::Length(1),                                      // 1  Source
@@ -510,11 +510,12 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         Constraint::Length(0),                                      // 5  Divider 1
         Constraint::Length(if show_name_row { 1 } else { 0 }),      // 6  Name
         Constraint::Length(1),                                      // 7  Prompt label
-        Constraint::Min(1),                                         // 8  Prompt body
+        Constraint::Length(PROMPT_BODY_HEIGHT),                     // 8  Prompt body
         Constraint::Length(0),                                      // 9  Divider 2
         Constraint::Length(1),                                      // 10 Agent
         Constraint::Length(0),                                      // 11 Divider 3
         Constraint::Length(1),                                      // 12 Hint
+        Constraint::Min(0),                                         // 13 Trailing slack
     ];
 
     let chunks = Layout::vertical(constraints)
@@ -684,14 +685,9 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     Paragraph::new(prompt_label).render(chunks[7], buf);
 
     // --- Prompt area ---
-    // chunks[8] uses `Min(1)` so the constraint solver may hand it more than
-    // `PROMPT_BODY_HEIGHT` rows when there's slack. Clamp the rendered rect
-    // so the body never visually exceeds 3 rows; the leftover slack reads as
-    // breathing room above the agent row.
-    let prompt_area = Rect {
-        height: chunks[8].height.min(PROMPT_BODY_HEIGHT),
-        ..chunks[8]
-    };
+    // chunks[8] is exactly `PROMPT_BODY_HEIGHT` rows; trailing slack is
+    // absorbed by the synthetic `Min(0)` row at the bottom of the layout.
+    let prompt_area = chunks[8];
     if !is_prompt {
         let summary = prompt_summary(
             *source,
