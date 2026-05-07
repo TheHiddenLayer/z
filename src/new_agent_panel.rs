@@ -12,9 +12,8 @@ use ratatui::{
     },
 };
 
-const NEW_AGENT_LABEL_W: u16 = 14;
+const LABEL_W: u16 = 14;
 const MAX_TASK_NAME_WIDTH: u16 = 40;
-const LABEL_W: u16 = NEW_AGENT_LABEL_W;
 const PROMPT_BODY_HEIGHT: u16 = 3;
 
 /// Payload prepared by `*_items` helpers, consumed by the stock `List` render.
@@ -370,7 +369,6 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         BranchMode::New => branches,
         BranchMode::Existing => existing_branches,
     };
-    let label_w = LABEL_W;
     let desired_list_height = source_list_height(*source, issues, mrs, active_list, source_query);
     let show_gitlab_source = matches!(source, NewAgentSource::Issue | NewAgentSource::Mr);
     let show_branch_controls = matches!(source, NewAgentSource::Branch | NewAgentSource::Issue);
@@ -636,7 +634,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     // continuity. The 2-col bump past `label_w` matches the inner offset every
     // other row picks up from `focus_block` (1-col border + 1-col padding when
     // focused; 2-col padding when unfocused).
-    let mut spans = vec![Span::raw(" ".repeat(label_w as usize + 2))];
+    let mut spans = vec![Span::raw(" ".repeat(LABEL_W as usize + 2))];
     spans.extend(hint_line.spans);
     Paragraph::new(Line::from(spans)).render(chunks[12], buf);
 }
@@ -874,8 +872,8 @@ mod tests {
         // The label column (columns 0..LABEL_W) must be identical, because every
         // row's label is invariant — if rows shift vertically, label glyphs land
         // at different y between the two states.
-        let a = cells_outside_columns(&on_repo, NEW_AGENT_LABEL_W..area.width);
-        let b = cells_outside_columns(&on_prompt, NEW_AGENT_LABEL_W..area.width);
+        let a = cells_outside_columns(&on_repo, LABEL_W..area.width);
+        let b = cells_outside_columns(&on_prompt, LABEL_W..area.width);
 
         assert_eq!(
             a, b,
