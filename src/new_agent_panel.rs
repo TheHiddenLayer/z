@@ -188,6 +188,14 @@ fn remote_status_line(message: &str, label_w: u16) -> Line<'static> {
     ])
 }
 
+fn render_remote_status(message: &str, area: Rect, buf: &mut Buffer) {
+    Paragraph::new(Span::styled(
+        message.to_string(),
+        Style::default().fg(DIM),
+    ))
+    .render(area, buf);
+}
+
 fn matches_source_query(label: &str, query: &str) -> bool {
     let trimmed = query.trim();
     trimmed.is_empty()
@@ -561,7 +569,8 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             BranchMode::New => "loading...",
             BranchMode::Existing => "no existing branches",
         };
-        Paragraph::new(remote_status_line(empty_msg, label_w)).render(list_area, buf);
+        let (_l, list_value) = split_row(list_area);
+        render_remote_status(empty_msg, list_value, buf);
     } else {
         let lines = active_list
             .iter()
