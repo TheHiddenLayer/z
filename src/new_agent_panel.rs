@@ -136,15 +136,23 @@ fn split_row(row: Rect) -> (Rect, Rect) {
     (label, value)
 }
 
+// `render_label` prepends a 2-col gutter so the label starts at column 2.
+// This reserves space for the focus accent bar that Task 8 will draw via
+// `Borders::LEFT` on the focused row's value sub-rect; until then, every row
+// gets the same indent so widths stay constant. The prefix is also relied on
+// by `ui.rs` snapshot tests (`new_agent_wizard_renders_source_tabs`,
+// `new_agent_wizard_orders_primary_controls`,
+// `new_agent_wizard_renders_prompt_and_agent_tabs`,
+// `generated_prompt_is_collapsed_until_prompt_focus`) which assert literal
+// strings like `"Repo        myapp"` and `"Source      issue  mr  branch"`.
+// Task 8 must remove this `format!` and replace it with the bordered block,
+// updating those snapshot tests in lockstep.
 fn render_label(text: &str, focused: bool, area: Rect, buf: &mut Buffer) {
     let style = if focused {
         Style::default().fg(TEXT)
     } else {
         Style::default().fg(DIM)
     };
-    // Two leading spaces reserve the focus-accent gutter that Task 8 will
-    // draw via `Borders::LEFT`. Keeping them constant preserves visual
-    // equivalence with the prior hand-rolled label column geometry.
     Paragraph::new(Span::styled(format!("  {text}"), style)).render(area, buf);
 }
 
