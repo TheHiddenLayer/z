@@ -372,14 +372,21 @@ pub async fn create_worktree(
     base_branch: Option<&str>,
     agent_name: &str,
 ) -> Result<PathBuf, String> {
-    // Validate branch name against git's own rules
+    // Validate branch name against git's own rules. Run inside repo so
+    // `--branch` can resolve `@{-N}` shorthand (it errors outside a worktree).
     let check = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
         .args(["check-ref-format", "--branch", branch])
         .output()
         .await
         .map_err(|e| format!("git failed: {e}"))?;
     if !check.status.success() {
-        return Err(format!("invalid branch name: {branch}"));
+        let stderr = String::from_utf8_lossy(&check.stderr);
+        return Err(format!(
+            "invalid branch name: {branch} ({})",
+            stderr.trim()
+        ));
     }
 
     // Refuse to create a branch that already exists
