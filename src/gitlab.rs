@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::Future;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -151,6 +152,22 @@ pub fn parse_merge_requests(json: &str) -> Result<Vec<GitlabMergeRequest>, Gitla
         .collect()
 }
 
+const GITLAB_LIST_PAGE_SIZE: usize = 100;
+
+fn review_merge_request_list_args(page: usize) -> Vec<String> {
+    vec![
+        "mr".to_string(),
+        "list".to_string(),
+        "--reviewer=@me".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+        "--page".to_string(),
+        page.to_string(),
+        "--per-page".to_string(),
+        GITLAB_LIST_PAGE_SIZE.to_string(),
+    ]
+}
+
 pub fn command_failure(command: &str, stderr: &str) -> GitlabError {
     let trimmed = stderr.trim();
     if trimmed.is_empty() {
@@ -202,24 +219,36 @@ pub async fn list_assigned_issues(repo: &Path) -> Result<Vec<GitlabIssue>, Gitla
     parse_issues(&json)
 }
 
+async fn list_review_merge_requests_with_runner<F, Fut>(
+    mut run_page: F,
+) -> Result<Vec<GitlabMergeRequest>, GitlabError>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: Future<Output = Result<String, GitlabError>>,
+{
+    let mut page = 1;
+    let mut all = Vec::new();
+    loop {
+        let json = run_page(page).await?;
+        let mut items = parse_merge_requests(&json)?;
+        let last_page = items.len() < GITLAB_LIST_PAGE_SIZE;
+        all.append(&mut items);
+        if last_page {
+            return Ok(all);
+        }
+        page += 1;
+    }
+}
+
 pub async fn list_review_merge_requests(
     repo: &Path,
 ) -> Result<Vec<GitlabMergeRequest>, GitlabError> {
-    let json = run_glab_json(
-        repo,
-        &[
-            "mr",
-            "list",
-            "--reviewer=@me",
-            "--output",
-            "json",
-            "--per-page",
-            "30",
-        ],
-        "mr list",
-    )
-    .await?;
-    parse_merge_requests(&json)
+    list_review_merge_requests_with_runner(|page| async move {
+        let args = review_merge_request_list_args(page);
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        run_glab_json(repo, &args, "mr list").await
+    })
+    .await
 }
 
 pub fn parse_mr_list(output: &str) -> Result<Option<MergeRequest>, String> {
@@ -829,9 +858,7 @@ mod tests {
                 iid: 1102,
                 title: "Detect agents remotely".to_string(),
                 description: Some("Use remote shell profiles.".to_string()),
-                web_url: Some(
-                    "https://gitlab.example.com/acme/example/-/issues/1102".to_string()
-                ),
+                web_url: Some("https://gitlab.example.com/acme/example/-/issues/1102".to_string()),
             }]
         );
     }
@@ -902,6 +929,39 @@ mod tests {
             mrs[0].web_url.as_deref(),
             Some("https://gitlab/x/y/-/merge_requests/9")
         );
+    }
+
+    #[tokio::test]
+    async fn list_review_merge_requests_fetches_all_pages() {
+        let seen_pages = std::cell::RefCell::new(Vec::new());
+
+        let result = list_review_merge_requests_with_runner(|page| {
+            seen_pages.borrow_mut().push(page);
+            async move {
+                let count = match page {
+                    1 => 100,
+                    2 => 2,
+                    _ => panic!("unexpected page {page}"),
+                };
+                let items = (0..count)
+                    .map(|offset| {
+                        let iid = page as u64 * 1000 + offset as u64;
+                        format!(
+                            r#"{{"iid":{iid},"title":"MR {iid}","source_branch":"branch-{iid}"}}"#
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Ok(format!("[{items}]"))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(seen_pages.into_inner(), vec![1, 2]);
+        assert_eq!(result.len(), 102);
+        assert_eq!(result[0].iid, 1000);
+        assert_eq!(result[101].iid, 2001);
     }
 
     #[test]

@@ -2250,7 +2250,7 @@ impl App {
                         (NewAgentFocus::Source, NewAgentSource::Branch, _) => {
                             NewAgentFocus::BranchToggle
                         }
-                        (NewAgentFocus::Search, _, _) => NewAgentFocus::Prompt,
+                        (NewAgentFocus::Search, _, _) => NewAgentFocus::SourceList,
                         (NewAgentFocus::SourceList, _, _) => NewAgentFocus::Prompt,
                         (NewAgentFocus::BranchToggle, _, _) => NewAgentFocus::BranchList,
                         (NewAgentFocus::BranchList, NewAgentSource::Branch, BranchMode::New) => {
@@ -2289,7 +2289,7 @@ impl App {
                         (NewAgentFocus::BranchList, _, _) => NewAgentFocus::BranchToggle,
                         (NewAgentFocus::Name, _, _) => NewAgentFocus::BranchList,
                         (NewAgentFocus::Prompt, NewAgentSource::Issue | NewAgentSource::Mr, _) => {
-                            NewAgentFocus::Search
+                            NewAgentFocus::SourceList
                         }
                         (NewAgentFocus::Prompt, NewAgentSource::Branch, BranchMode::New) => {
                             NewAgentFocus::Name
@@ -2388,22 +2388,12 @@ impl App {
                 }
                 // Vertical fields: SourceList, BranchList
                 KeyCode::Up
-                    if matches!(
-                        focus,
-                        NewAgentFocus::Search
-                            | NewAgentFocus::SourceList
-                            | NewAgentFocus::BranchList
-                    ) =>
+                    if matches!(focus, NewAgentFocus::SourceList | NewAgentFocus::BranchList) =>
                 {
                     Some(Action::PickerPrev)
                 }
                 KeyCode::Down
-                    if matches!(
-                        focus,
-                        NewAgentFocus::Search
-                            | NewAgentFocus::SourceList
-                            | NewAgentFocus::BranchList
-                    ) =>
+                    if matches!(focus, NewAgentFocus::SourceList | NewAgentFocus::BranchList) =>
                 {
                     Some(Action::PickerNext)
                 }
@@ -4254,6 +4244,33 @@ mod tests {
         let expected = vec![
             NewAgentFocus::Source,
             NewAgentFocus::Search,
+            NewAgentFocus::SourceList,
+            NewAgentFocus::Prompt,
+            NewAgentFocus::Agent,
+            NewAgentFocus::Repo,
+        ];
+        for exp in expected {
+            app.update(Action::FocusNext);
+            if let Mode::NewAgent { focus, .. } = &app.mode {
+                assert_eq!(*focus, exp);
+            } else {
+                panic!("expected NewAgent mode");
+            }
+        }
+    }
+
+    #[test]
+    fn focus_cycles_through_mr_source_states() {
+        let mut app = test_app_in_new_agent_mode();
+        if let Mode::NewAgent { source, focus, .. } = &mut app.mode {
+            *source = NewAgentSource::Mr;
+            *focus = NewAgentFocus::Repo;
+        }
+
+        let expected = vec![
+            NewAgentFocus::Source,
+            NewAgentFocus::Search,
+            NewAgentFocus::SourceList,
             NewAgentFocus::Prompt,
             NewAgentFocus::Agent,
             NewAgentFocus::Repo,
@@ -6748,6 +6765,17 @@ mod tests {
             app.handle_key(make_key(KeyCode::Char('q'))),
             Some(Action::TypeChar('q'))
         ));
+    }
+
+    #[test]
+    fn newagent_search_up_down_do_not_move_source_list() {
+        let mut app = test_app_in_new_agent_mode();
+        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+            *focus = NewAgentFocus::Search;
+        }
+
+        assert!(app.handle_key(make_key(KeyCode::Up)).is_none());
+        assert!(app.handle_key(make_key(KeyCode::Down)).is_none());
     }
 
     #[test]

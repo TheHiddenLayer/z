@@ -14,6 +14,7 @@ use ratatui::{
 
 const NEW_AGENT_LABEL_W: u16 = 14;
 const MAX_TASK_NAME_WIDTH: u16 = 40;
+const MAX_SOURCE_LIST_WIDTH: u16 = 88;
 
 pub struct NewAgentPanelWidget<'a> {
     app: &'a App,
@@ -401,17 +402,26 @@ fn list_content_area(area: Rect, needs_scrollbar: bool) -> Rect {
     }
 }
 
+fn list_outer_area(area: Rect) -> Rect {
+    Rect {
+        width: area.width.min(MAX_SOURCE_LIST_WIDTH),
+        ..area
+    }
+}
+
 fn render_selectable_list(
     lines: Vec<Line<'static>>,
     selected_pos: Option<usize>,
     area: Rect,
     buf: &mut Buffer,
 ) {
+    Paragraph::new("").render(area, buf);
+    let area = list_outer_area(area);
     let visible_rows = area.height;
     let offset = list_scroll_offset(selected_pos, visible_rows);
     let content_len = lines.len();
-    let needs_scrollbar = content_len > visible_rows as usize && area.width > 1;
-    let list_area = list_content_area(area, needs_scrollbar);
+    let show_scrollbar = content_len > visible_rows as usize && area.width > 1;
+    let list_area = list_content_area(area, show_scrollbar);
 
     let mut state = ListState::default()
         .with_selected(selected_pos)
@@ -421,12 +431,18 @@ fn render_selectable_list(
 
     StatefulWidget::render(list, list_area, buf, &mut state);
 
-    if needs_scrollbar {
+    if show_scrollbar {
         let mut scrollbar_state = ScrollbarState::new(content_len)
             .viewport_content_length(visible_rows as usize)
             .position(state.offset());
         StatefulWidget::render(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight).style(Style::default().fg(DIM)),
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("\u{2502}"))
+                .thumb_symbol("\u{2590}")
+                .track_style(Style::default().fg(DIM))
+                .thumb_style(Style::default().fg(TEXT)),
             area,
             buf,
             &mut scrollbar_state,
@@ -959,6 +975,50 @@ mod tests {
         assert_eq!(
             list_content_area(Rect::new(0, 0, 1, 6), true),
             Rect::new(0, 0, 1, 6)
+        );
+    }
+
+    #[test]
+    fn render_selectable_list_hides_scrollbar_when_rows_fill_viewport() {
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buf = Buffer::empty(area);
+        let lines = (1..=6)
+            .map(|n| Line::from(format!("item {n}")))
+            .collect::<Vec<_>>();
+
+        render_selectable_list(lines, Some(0), area, &mut buf);
+
+        assert!(
+            !buf.content().iter().any(|cell| cell.symbol() == "\u{2590}"),
+            "filled viewport with no hidden rows should not show a scrollbar"
+        );
+    }
+
+    #[test]
+    fn render_selectable_list_shows_scrollbar_when_rows_exceed_viewport() {
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buf = Buffer::empty(area);
+        let lines = (1..=7)
+            .map(|n| Line::from(format!("item {n}")))
+            .collect::<Vec<_>>();
+
+        render_selectable_list(lines, Some(6), area, &mut buf);
+
+        assert!(
+            buf.content().iter().any(|cell| cell.symbol() == "\u{2590}"),
+            "hidden rows should show a list scrollbar"
+        );
+    }
+
+    #[test]
+    fn list_outer_area_caps_wide_source_lists() {
+        assert_eq!(
+            list_outer_area(Rect::new(2, 3, 200, 6)),
+            Rect::new(2, 3, MAX_SOURCE_LIST_WIDTH, 6)
+        );
+        assert_eq!(
+            list_outer_area(Rect::new(2, 3, 80, 6)),
+            Rect::new(2, 3, 80, 6)
         );
     }
 
