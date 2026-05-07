@@ -530,7 +530,7 @@ mod tests {
     }
 
     fn render_app(app: &App) -> String {
-        let backend = TestBackend::new(80, 24);
+        let backend = TestBackend::new(80, 36);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| draw(frame, app)).unwrap();
@@ -539,7 +539,7 @@ mod tests {
     }
 
     fn render_app_buffer(app: &App) -> Buffer {
-        let backend = TestBackend::new(80, 24);
+        let backend = TestBackend::new(80, 36);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| draw(frame, app)).unwrap();
@@ -717,9 +717,10 @@ mod tests {
     #[test]
     fn branch_wizard_locks_prompt_body_to_three_rows_when_unfocused() {
         // The wizard's prompt body is fixed at PROMPT_BODY_HEIGHT (3) rows
-        // regardless of focus, per the layout-redesign spec. The agent row
-        // therefore lands exactly 4 rows below the prompt-label row:
-        //   prompt label (1) + prompt body (3) = 4.
+        // regardless of focus, per the layout-redesign spec. With the group
+        // divider between the prompt body and the agent row, the agent row
+        // lands exactly 5 rows below the prompt-label row:
+        //   prompt label (1) + prompt body (3) + divider (1) = 5.
         let app = branch_source_app();
         let text = render_app(&app);
         let lines: Vec<&str> = text.lines().collect();
@@ -734,8 +735,8 @@ mod tests {
 
         assert_eq!(
             agent_row.saturating_sub(prompt_row),
-            4,
-            "prompt body should always reserve 3 rows; agent must sit 4 rows below the prompt label:\n{text}"
+            5,
+            "prompt body should always reserve 3 rows with a divider beneath; agent must sit 5 rows below the prompt label:\n{text}"
         );
     }
 

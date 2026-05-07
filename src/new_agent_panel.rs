@@ -207,6 +207,13 @@ fn tab_value_line(options: &[&str], selected: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+fn render_divider(area: Rect, buf: &mut Buffer) {
+    Block::new()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(DIM))
+        .render(area, buf);
+}
+
 fn render_remote_status(message: &str, area: Rect, buf: &mut Buffer) {
     Paragraph::new(Span::styled(
         message.to_string(),
@@ -377,24 +384,24 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     let list_height = desired_list_height.clamp(1, 6);
 
     // Row order. `Length(0)` rows render nothing and consume nothing visually.
-    // Dividers reserve zero height in this task; Task 9 will switch them to
-    // `Length(1)` once their `─` glyph is painted. The list row uses `Max` so
-    // it shrinks gracefully in tight viewports. The trailing `Min(0)` is the
-    // single explicit slack absorber — every other row carries an exact size,
-    // so a future `Min`/`Max` constraint cannot accidentally split the slack.
+    // Dividers carry one row each and render a thin `─` rule between groups.
+    // The list row uses `Max` so it shrinks gracefully in tight viewports. The
+    // trailing `Min(0)` is the single explicit slack absorber — every other
+    // row carries an exact size, so a future `Min`/`Max` constraint cannot
+    // accidentally split the slack.
     let constraints = [
         Constraint::Length(1),                                      // 0  Repo
         Constraint::Length(1),                                      // 1  Source
         Constraint::Length(if show_branch_toggle { 1 } else { 0 }), // 2  Branch toggle
         Constraint::Length(if show_gitlab_source { 1 } else { 0 }), // 3  Search
         Constraint::Max(list_height),                               // 4  List
-        Constraint::Length(0),                                      // 5  Divider 1
+        Constraint::Length(1),                                      // 5  Divider 1
         Constraint::Length(if show_name_row { 1 } else { 0 }),      // 6  Name
         Constraint::Length(1),                                      // 7  Prompt label
         Constraint::Length(PROMPT_BODY_HEIGHT),                     // 8  Prompt body
-        Constraint::Length(0),                                      // 9  Divider 2
+        Constraint::Length(1),                                      // 9  Divider 2
         Constraint::Length(1),                                      // 10 Agent
-        Constraint::Length(0),                                      // 11 Divider 3
+        Constraint::Length(1),                                      // 11 Divider 3
         Constraint::Length(1),                                      // 12 Hint
         Constraint::Min(0),                                         // 13 Trailing slack
     ];
@@ -594,6 +601,11 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     let agent_inner = render_focus_frame(is_agent, agent_value_rect, buf);
     Paragraph::new(tab_value_line(&agent_options, agent_selected))
         .render(agent_inner, buf);
+
+    // --- Group dividers ---
+    render_divider(chunks[5], buf);
+    render_divider(chunks[9], buf);
+    render_divider(chunks[11], buf);
 
     // --- Hint bar ---
     let hint_line = match focus {
@@ -916,6 +928,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn three_group_dividers_render_horizontal_rules() {
+        let app = wizard_app();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        NewAgentPanelWidget::new(&app).render(area, &mut buf);
+
+        let mut divider_rows = 0;
+        for y in 0..area.height {
+            let row: String = (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            if row.chars().filter(|c| *c == '─').count() >= (area.width as usize - 4) {
+                divider_rows += 1;
+            }
+        }
+        assert_eq!(divider_rows, 3, "expected exactly three group dividers");
     }
 
     #[test]
