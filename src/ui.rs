@@ -489,7 +489,7 @@ mod tests {
     use crate::app::Action;
     use crate::app::{BranchMode, Mode, NewAgentFocus, NewAgentSource, PromptMode, RemoteList};
     use crate::config::Config;
-    use crate::gitlab::GitlabIssue;
+    use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
     fn test_app() -> App {
@@ -600,6 +600,17 @@ mod tests {
             title: title.to_string(),
             description: None,
             web_url: None,
+        }
+    }
+
+    fn mr(iid: u64, title: &str, source_branch: &str) -> GitlabMergeRequest {
+        GitlabMergeRequest {
+            iid,
+            title: title.to_string(),
+            description: None,
+            web_url: None,
+            source_branch: source_branch.to_string(),
+            target_branch: None,
         }
     }
 
@@ -833,6 +844,87 @@ mod tests {
         assert!(
             !text.contains("#1 Issue 1"),
             "first issue should scroll out of the six-row source list:\n{text}"
+        );
+    }
+
+    #[test]
+    fn new_agent_wizard_scrolls_selected_mr_into_view() {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+
+        if let Mode::NewAgent {
+            focus,
+            source,
+            mrs,
+            source_index,
+            selected_mr,
+            ..
+        } = &mut app.mode
+        {
+            *focus = NewAgentFocus::SourceList;
+            *source = NewAgentSource::Mr;
+            *source_index = 7;
+            let items = (1..=8)
+                .map(|n| mr(n, &format!("MR {n}"), &format!("feature/mr-{n}")))
+                .collect::<Vec<_>>();
+            *selected_mr = items.get(7).cloned();
+            *mrs = RemoteList::Loaded(items);
+        } else {
+            panic!("expected new-agent mode");
+        }
+
+        let text = render_app(&app);
+
+        assert!(
+            text.contains("!8 MR 8 feature/mr-8"),
+            "selected MR should be visible after scrolling:\n{text}"
+        );
+        assert!(
+            !text.contains("!1 MR 1 feature/mr-1"),
+            "first MR should scroll out of the six-row MR list:\n{text}"
+        );
+        assert!(
+            text.contains("\u{2590}"),
+            "MR source list should render a visible scrollbar thumb:\n{text}"
+        );
+    }
+
+    #[test]
+    fn new_agent_wizard_scrolls_mr_list_after_picker_next() {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+
+        if let Mode::NewAgent {
+            focus,
+            source,
+            mrs,
+            source_index,
+            selected_mr,
+            ..
+        } = &mut app.mode
+        {
+            *focus = NewAgentFocus::SourceList;
+            *source = NewAgentSource::Mr;
+            *source_index = 5;
+            let items = (1..=7)
+                .map(|n| mr(n, &format!("MR {n}"), &format!("feature/mr-{n}")))
+                .collect::<Vec<_>>();
+            *selected_mr = items.get(5).cloned();
+            *mrs = RemoteList::Loaded(items);
+        } else {
+            panic!("expected new-agent mode");
+        }
+
+        app.update(Action::PickerNext);
+        let text = render_app(&app);
+
+        assert!(
+            text.contains("!7 MR 7 feature/mr-7"),
+            "down from the last visible MR should reveal the next MR:\n{text}"
+        );
+        assert!(
+            !text.contains("!1 MR 1 feature/mr-1"),
+            "MR list should scroll instead of staying pinned to the first row:\n{text}"
         );
     }
 
