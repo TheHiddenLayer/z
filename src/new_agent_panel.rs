@@ -7,16 +7,28 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        StatefulWidget, Widget, Wrap,
+        HighlightSpacing, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap,
     },
 };
 
 const NEW_AGENT_LABEL_W: u16 = 14;
 const MAX_TASK_NAME_WIDTH: u16 = 40;
-const MAX_SOURCE_LIST_WIDTH: u16 = 88;
 const LABEL_W: u16 = NEW_AGENT_LABEL_W;
 const PROMPT_BODY_HEIGHT: u16 = 3;
+
+/// Payload prepared by `*_items` helpers, consumed by the stock `List` render.
+///
+/// `Status` routes through `render_remote_status` (loading / failed / empty).
+/// `Items` carries owned label strings plus the originating `RemoteList` index
+/// for each row, so the caller can map a `ListState` selection back to the
+/// `source_index` field on `Mode::NewAgent`.
+enum ListPayload {
+    Status(String),
+    Items {
+        labels: Vec<String>,
+        indices: Vec<usize>,
+    },
+}
 
 pub struct NewAgentPanelWidget<'a> {
     app: &'a App,
@@ -181,6 +193,7 @@ fn tab_value_line(options: &[&str], selected: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+#[cfg(test)]
 fn remote_status_line(message: &str, label_w: u16) -> Line<'static> {
     Line::from(vec![
         Span::raw(" ".repeat(label_w as usize)),
@@ -202,20 +215,6 @@ fn matches_source_query(label: &str, query: &str) -> bool {
         || label
             .to_ascii_lowercase()
             .contains(&trimmed.to_ascii_lowercase())
-}
-
-fn selectable_source_line(label: String, selected: bool, label_w: u16) -> Line<'static> {
-    let style = if selected {
-        Style::default().fg(TEXT)
-    } else {
-        Style::default().fg(DIM)
-    };
-    let indicator = if selected { "\u{2502} " } else { "  " };
-    Line::from(vec![
-        Span::raw(" ".repeat(label_w as usize)),
-        Span::styled(indicator, style),
-        Span::styled(label, style),
-    ])
 }
 
 fn issue_label(issue: &GitlabIssue) -> String {
@@ -243,78 +242,54 @@ fn filtered_mr_indices(mrs: &[GitlabMergeRequest], query: &str) -> Vec<usize> {
         .collect()
 }
 
-fn filtered_issue_lines(
-    issues: &RemoteList<GitlabIssue>,
-    query: &str,
-    selected_index: usize,
-    label_w: u16,
-) -> Vec<Line<'static>> {
+fn issue_items(issues: &RemoteList<GitlabIssue>, query: &str) -> ListPayload {
     match issues {
         RemoteList::Idle | RemoteList::Loading => {
-            vec![remote_status_line("loading assigned issues...", label_w)]
+            ListPayload::Status("loading assigned issues...".to_string())
         }
-        RemoteList::Failed(message) => {
-            vec![remote_status_line(&format!("error: {message}"), label_w)]
-        }
+        RemoteList::Failed(message) => ListPayload::Status(format!("error: {message}")),
         RemoteList::Loaded(items) => {
             let indices = filtered_issue_indices(items, query);
             if indices.is_empty() {
-                let message = if items.is_empty() {
+                let msg = if items.is_empty() {
                     "no assigned issues"
                 } else {
                     "no matching issues"
                 };
-                return vec![remote_status_line(message, label_w)];
+                return ListPayload::Status(msg.to_string());
             }
-            indices
-                .into_iter()
-                .map(|index| {
-                    selectable_source_line(
-                        issue_label(&items[index]),
-                        index == selected_index,
-                        label_w,
-                    )
-                })
-                .collect()
+            let labels: Vec<String> = indices.iter().map(|i| issue_label(&items[*i])).collect();
+            ListPayload::Items { labels, indices }
         }
     }
 }
 
-fn filtered_mr_lines(
-    mrs: &RemoteList<GitlabMergeRequest>,
-    query: &str,
-    selected_index: usize,
-    label_w: u16,
-) -> Vec<Line<'static>> {
+fn mr_items(mrs: &RemoteList<GitlabMergeRequest>, query: &str) -> ListPayload {
     match mrs {
         RemoteList::Idle | RemoteList::Loading => {
-            vec![remote_status_line("loading review MRs...", label_w)]
+            ListPayload::Status("loading review MRs...".to_string())
         }
-        RemoteList::Failed(message) => {
-            vec![remote_status_line(&format!("error: {message}"), label_w)]
-        }
+        RemoteList::Failed(message) => ListPayload::Status(format!("error: {message}")),
         RemoteList::Loaded(items) => {
             let indices = filtered_mr_indices(items, query);
             if indices.is_empty() {
-                let message = if items.is_empty() {
+                let msg = if items.is_empty() {
                     "no MRs needing review"
                 } else {
                     "no matching MRs"
                 };
-                return vec![remote_status_line(message, label_w)];
+                return ListPayload::Status(msg.to_string());
             }
-            indices
-                .into_iter()
-                .map(|index| {
-                    selectable_source_line(
-                        mr_label(&items[index]),
-                        index == selected_index,
-                        label_w,
-                    )
-                })
-                .collect()
+            let labels: Vec<String> = indices.iter().map(|i| mr_label(&items[*i])).collect();
+            ListPayload::Items { labels, indices }
         }
     }
+}
+
+fn branch_items(branches: &[String]) -> ListPayload {
+    let labels: Vec<String> = branches.to_vec();
+    let indices: Vec<usize> = (0..branches.len()).collect();
+    ListPayload::Items { labels, indices }
 }
 
 fn source_list_height(
@@ -336,73 +311,6 @@ fn source_list_height(
         NewAgentSource::Branch => branches.len(),
     };
     count.clamp(1, 6) as u16
-}
-
-fn list_scroll_offset(selected_pos: Option<usize>, visible_rows: u16) -> usize {
-    let visible = visible_rows as usize;
-    selected_pos
-        .filter(|_| visible > 0)
-        .map(|pos| pos.saturating_add(1).saturating_sub(visible))
-        .unwrap_or(0)
-}
-
-fn list_content_area(area: Rect, needs_scrollbar: bool) -> Rect {
-    if needs_scrollbar && area.width > 1 {
-        Rect {
-            width: area.width.saturating_sub(1),
-            ..area
-        }
-    } else {
-        area
-    }
-}
-
-fn list_outer_area(area: Rect) -> Rect {
-    Rect {
-        width: area.width.min(MAX_SOURCE_LIST_WIDTH),
-        ..area
-    }
-}
-
-fn render_selectable_list(
-    lines: Vec<Line<'static>>,
-    selected_pos: Option<usize>,
-    area: Rect,
-    buf: &mut Buffer,
-) {
-    Paragraph::new("").render(area, buf);
-    let area = list_outer_area(area);
-    let visible_rows = area.height;
-    let offset = list_scroll_offset(selected_pos, visible_rows);
-    let content_len = lines.len();
-    let show_scrollbar = content_len > visible_rows as usize && area.width > 1;
-    let list_area = list_content_area(area, show_scrollbar);
-
-    let mut state = ListState::default()
-        .with_selected(selected_pos)
-        .with_offset(offset);
-    let items = lines.into_iter().map(ListItem::new).collect::<Vec<_>>();
-    let list = List::new(items).style(Style::default().fg(DIM));
-
-    StatefulWidget::render(list, list_area, buf, &mut state);
-
-    if show_scrollbar {
-        let mut scrollbar_state = ScrollbarState::new(content_len)
-            .viewport_content_length(visible_rows as usize)
-            .position(state.offset());
-        StatefulWidget::render(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_symbol(Some("\u{2502}"))
-                .thumb_symbol("\u{2590}")
-                .track_style(Style::default().fg(DIM))
-                .thumb_style(Style::default().fg(TEXT)),
-            area,
-            buf,
-            &mut scrollbar_state,
-        );
-    }
 }
 
 fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
@@ -540,44 +448,38 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         };
         Paragraph::new(Span::styled(search_value_text, search_value_style))
             .render(search_value_rect, buf);
+    }
 
-        let all_lines = match source {
-            NewAgentSource::Issue => {
-                filtered_issue_lines(issues, source_query, *source_index, label_w)
+    let (_l, list_value) = split_row(list_area);
+    let payload = match source {
+        NewAgentSource::Issue => issue_items(issues, source_query),
+        NewAgentSource::Mr => mr_items(mrs, source_query),
+        NewAgentSource::Branch => match (active_list.is_empty(), branch_mode) {
+            (true, BranchMode::New) => ListPayload::Status("loading...".to_string()),
+            (true, BranchMode::Existing) => {
+                ListPayload::Status("no existing branches".to_string())
             }
-            NewAgentSource::Mr => filtered_mr_lines(mrs, source_query, *source_index, label_w),
-            NewAgentSource::Branch => Vec::new(),
-        };
-        let selected_pos = match source {
-            NewAgentSource::Issue => match issues {
-                RemoteList::Loaded(items) => filtered_issue_indices(items, source_query)
-                    .into_iter()
-                    .position(|index| index == *source_index),
-                _ => None,
-            },
-            NewAgentSource::Mr => match mrs {
-                RemoteList::Loaded(items) => filtered_mr_indices(items, source_query)
-                    .into_iter()
-                    .position(|index| index == *source_index),
-                _ => None,
-            },
-            NewAgentSource::Branch => None,
-        };
-        render_selectable_list(all_lines, selected_pos, list_area, buf);
-    } else if active_list.is_empty() {
-        let empty_msg = match branch_mode {
-            BranchMode::New => "loading...",
-            BranchMode::Existing => "no existing branches",
-        };
-        let (_l, list_value) = split_row(list_area);
-        render_remote_status(empty_msg, list_value, buf);
-    } else {
-        let lines = active_list
-            .iter()
-            .enumerate()
-            .map(|(i, b)| selectable_source_line(b.clone(), i == *base_index, label_w))
-            .collect();
-        render_selectable_list(lines, Some(*base_index), list_area, buf);
+            _ => branch_items(active_list),
+        },
+    };
+    match payload {
+        ListPayload::Status(msg) => render_remote_status(&msg, list_value, buf),
+        ListPayload::Items { labels, indices } => {
+            let selected_pos = match source {
+                NewAgentSource::Issue | NewAgentSource::Mr => {
+                    indices.iter().position(|&i| i == *source_index)
+                }
+                NewAgentSource::Branch => Some(*base_index),
+            };
+            let items: Vec<ListItem> = labels.into_iter().map(ListItem::new).collect();
+            let list = List::new(items)
+                .style(Style::default().fg(DIM))
+                .highlight_style(Style::default().fg(TEXT).add_modifier(Modifier::BOLD))
+                .highlight_symbol("\u{258C} ")
+                .highlight_spacing(HighlightSpacing::Always);
+            let mut state = ListState::default().with_selected(selected_pos);
+            StatefulWidget::render(list, list_value, buf, &mut state);
+        }
     }
 
     // --- Name row ---
@@ -748,52 +650,68 @@ mod tests {
     }
 
     #[test]
-    fn filtered_issue_lines_render_number_title_and_selection() {
-        let issues = RemoteList::Loaded(vec![
-            issue(123, "Fix agent startup"),
-            issue(456, "Document setup"),
-        ]);
-
-        let lines = filtered_issue_lines(&issues, "agent", 0, 4);
-
-        assert_eq!(lines.len(), 1);
-        assert_eq!(line_text(&lines[0]), "    \u{2502} #123 Fix agent startup");
+    fn issue_items_yield_status_when_loading() {
+        let payload = issue_items(&RemoteList::Loading, "");
+        assert!(matches!(payload, ListPayload::Status(_)));
     }
 
     #[test]
-    fn filtered_issue_lines_distinguish_empty_from_no_matches() {
-        let empty = filtered_issue_lines(&RemoteList::Loaded(vec![]), "", 0, 2);
-        assert_eq!(line_text(&empty[0]), "  no assigned issues");
-
-        let issues = RemoteList::Loaded(vec![issue(123, "Fix agent startup")]);
-        let no_match = filtered_issue_lines(&issues, "billing", 0, 2);
-        assert_eq!(line_text(&no_match[0]), "  no matching issues");
+    fn issue_items_filter_by_query() {
+        let issues = RemoteList::Loaded(vec![issue(1, "alpha"), issue(2, "beta")]);
+        let payload = issue_items(&issues, "alp");
+        match payload {
+            ListPayload::Items { labels, indices } => {
+                assert_eq!(labels, vec!["#1 alpha"]);
+                assert_eq!(indices, vec![0]);
+            }
+            _ => panic!("expected Items"),
+        }
     }
 
     #[test]
-    fn filtered_mr_lines_include_source_branch() {
+    fn issue_items_distinguish_empty_from_no_matches() {
+        let empty = issue_items(&RemoteList::Loaded(vec![]), "");
+        match empty {
+            ListPayload::Status(msg) => assert_eq!(msg, "no assigned issues"),
+            _ => panic!("expected Status"),
+        }
+        let issues = RemoteList::Loaded(vec![issue(1, "alpha")]);
+        let no_match = issue_items(&issues, "billing");
+        match no_match {
+            ListPayload::Status(msg) => assert_eq!(msg, "no matching issues"),
+            _ => panic!("expected Status"),
+        }
+    }
+
+    #[test]
+    fn mr_items_filter_by_query_and_include_source_branch() {
         let mrs = RemoteList::Loaded(vec![
             mr(7, "Review renderer", "feature/render"),
             mr(8, "Update docs", "docs/readme"),
         ]);
-
-        let lines = filtered_mr_lines(&mrs, "render", 0, 2);
-
-        assert_eq!(lines.len(), 1);
-        assert_eq!(
-            line_text(&lines[0]),
-            "  \u{2502} !7 Review renderer feature/render"
-        );
+        let payload = mr_items(&mrs, "render");
+        match payload {
+            ListPayload::Items { labels, indices } => {
+                assert_eq!(labels, vec!["!7 Review renderer feature/render"]);
+                assert_eq!(indices, vec![0]);
+            }
+            _ => panic!("expected Items"),
+        }
     }
 
     #[test]
-    fn filtered_mr_lines_distinguish_empty_from_no_matches() {
-        let empty = filtered_mr_lines(&RemoteList::Loaded(vec![]), "", 0, 2);
-        assert_eq!(line_text(&empty[0]), "  no MRs needing review");
-
+    fn mr_items_distinguish_empty_from_no_matches() {
+        let empty = mr_items(&RemoteList::Loaded(vec![]), "");
+        match empty {
+            ListPayload::Status(msg) => assert_eq!(msg, "no MRs needing review"),
+            _ => panic!("expected Status"),
+        }
         let mrs = RemoteList::Loaded(vec![mr(7, "Review renderer", "feature/render")]);
-        let no_match = filtered_mr_lines(&mrs, "billing", 0, 2);
-        assert_eq!(line_text(&no_match[0]), "  no matching MRs");
+        let no_match = mr_items(&mrs, "billing");
+        match no_match {
+            ListPayload::Status(msg) => assert_eq!(msg, "no matching MRs"),
+            _ => panic!("expected Status"),
+        }
     }
 
     #[test]
@@ -804,68 +722,69 @@ mod tests {
     }
 
     #[test]
-    fn list_scroll_offset_keeps_selected_last_visible() {
-        assert_eq!(list_scroll_offset(Some(0), 6), 0);
-        assert_eq!(list_scroll_offset(Some(5), 6), 0);
-        assert_eq!(list_scroll_offset(Some(6), 6), 1);
-        assert_eq!(list_scroll_offset(Some(7), 6), 2);
-        assert_eq!(list_scroll_offset(None, 6), 0);
-        assert_eq!(list_scroll_offset(Some(7), 0), 0);
-    }
+    fn list_selection_change_keeps_items_at_same_column() {
+        let mut app = wizard_app();
+        if let Mode::NewAgent {
+            source,
+            issues,
+            source_index,
+            focus,
+            ..
+        } = &mut app.mode
+        {
+            *source = NewAgentSource::Issue;
+            *issues = RemoteList::Loaded(vec![
+                issue(1, "alpha"),
+                issue(2, "beta"),
+                issue(3, "gamma"),
+            ]);
+            *source_index = 0;
+            *focus = NewAgentFocus::SourceList;
+        }
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf_a = Buffer::empty(area);
+        NewAgentPanelWidget::new(&app).render(area, &mut buf_a);
 
-    #[test]
-    fn list_content_area_reserves_scrollbar_column_only_when_needed() {
-        let area = Rect::new(2, 3, 20, 6);
+        if let Mode::NewAgent { source_index, .. } = &mut app.mode {
+            *source_index = 1;
+        }
+        let mut buf_b = Buffer::empty(area);
+        NewAgentPanelWidget::new(&app).render(area, &mut buf_b);
 
-        assert_eq!(list_content_area(area, false), area);
-        assert_eq!(list_content_area(area, true), Rect::new(2, 3, 19, 6));
+        // The text "alpha" must appear at the same column in both buffers.
+        // Scan column-by-column (not by byte) because cell symbols can be
+        // multi-byte (the `▌` highlight glyph is 3 bytes), and we want the
+        // visual column where the substring begins.
+        let col_in = |buf: &Buffer, needle: &str| -> Option<u16> {
+            let needle_chars: Vec<char> = needle.chars().collect();
+            for y in 0..area.height {
+                let mut start_x: Option<u16> = None;
+                let mut matched = 0usize;
+                for x in 0..area.width {
+                    let sym = buf[(x, y)].symbol();
+                    if sym.chars().count() == 1
+                        && sym.chars().next() == Some(needle_chars[matched])
+                    {
+                        if matched == 0 {
+                            start_x = Some(x);
+                        }
+                        matched += 1;
+                        if matched == needle_chars.len() {
+                            return start_x;
+                        }
+                    } else {
+                        matched = 0;
+                        start_x = None;
+                    }
+                }
+            }
+            None
+        };
+        let col_a = col_in(&buf_a, "alpha").unwrap();
+        let col_b = col_in(&buf_b, "alpha").unwrap();
         assert_eq!(
-            list_content_area(Rect::new(0, 0, 1, 6), true),
-            Rect::new(0, 0, 1, 6)
-        );
-    }
-
-    #[test]
-    fn render_selectable_list_hides_scrollbar_when_rows_fill_viewport() {
-        let area = Rect::new(0, 0, 80, 6);
-        let mut buf = Buffer::empty(area);
-        let lines = (1..=6)
-            .map(|n| Line::from(format!("item {n}")))
-            .collect::<Vec<_>>();
-
-        render_selectable_list(lines, Some(0), area, &mut buf);
-
-        assert!(
-            !buf.content().iter().any(|cell| cell.symbol() == "\u{2590}"),
-            "filled viewport with no hidden rows should not show a scrollbar"
-        );
-    }
-
-    #[test]
-    fn render_selectable_list_shows_scrollbar_when_rows_exceed_viewport() {
-        let area = Rect::new(0, 0, 80, 6);
-        let mut buf = Buffer::empty(area);
-        let lines = (1..=7)
-            .map(|n| Line::from(format!("item {n}")))
-            .collect::<Vec<_>>();
-
-        render_selectable_list(lines, Some(6), area, &mut buf);
-
-        assert!(
-            buf.content().iter().any(|cell| cell.symbol() == "\u{2590}"),
-            "hidden rows should show a list scrollbar"
-        );
-    }
-
-    #[test]
-    fn list_outer_area_caps_wide_source_lists() {
-        assert_eq!(
-            list_outer_area(Rect::new(2, 3, 200, 6)),
-            Rect::new(2, 3, MAX_SOURCE_LIST_WIDTH, 6)
-        );
-        assert_eq!(
-            list_outer_area(Rect::new(2, 3, 80, 6)),
-            Rect::new(2, 3, 80, 6)
+            col_a, col_b,
+            "list item shifted horizontally when selection changed"
         );
     }
 

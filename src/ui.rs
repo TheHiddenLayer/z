@@ -888,10 +888,6 @@ mod tests {
             !text.contains("!1 MR 1 feature/mr-1"),
             "first MR should scroll out of the six-row MR list:\n{text}"
         );
-        assert!(
-            text.contains("\u{2590}"),
-            "MR source list should render a visible scrollbar thumb:\n{text}"
-        );
     }
 
     #[test]
