@@ -622,36 +622,18 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     // --- Prompt area ---
     // chunks[8] is exactly `PROMPT_BODY_HEIGHT` rows; trailing slack is
     // absorbed by the synthetic `Min(0)` row at the bottom of the layout.
-    let prompt_area = chunks[8];
+    let (_label, body_rect) = split_row(chunks[8]);
     if !is_prompt {
-        let summary = prompt_summary(
-            *source,
-            *prompt_mode,
-            prompt,
-            prompt_area.width.saturating_sub(label_w),
-        );
-        let line = Line::from(vec![
-            Span::raw(" ".repeat(label_w as usize)),
-            Span::styled(summary, Style::default().fg(DIM)),
-        ]);
-        Paragraph::new(line).render(prompt_area, buf);
+        let summary = prompt_summary(*source, *prompt_mode, prompt, body_rect.width);
+        Paragraph::new(Span::styled(summary, Style::default().fg(DIM)))
+            .render(body_rect, buf);
     } else if prompt.is_empty() {
-        let placeholder = if is_prompt {
-            Line::from(vec![
-                Span::raw(" ".repeat(label_w as usize)),
-                Span::styled("_", Style::default().fg(TEXT)),
-            ])
-        } else {
-            Line::from(vec![
-                Span::raw(" ".repeat(label_w as usize)),
-                Span::styled("describe the task...", Style::default().fg(DIM)),
-            ])
-        };
-        Paragraph::new(placeholder).render(prompt_area, buf);
+        let placeholder = Span::styled("_", Style::default().fg(TEXT));
+        Paragraph::new(placeholder).render(body_rect, buf);
     } else {
-        let cursor = if is_prompt { "_" } else { "" };
-        let text = format!("{}{}{}", " ".repeat(label_w as usize), prompt, cursor);
-        let width = prompt_area.width.max(1) as usize;
+        let cursor = "_";
+        let text = format!("{prompt}{cursor}");
+        let width = body_rect.width.max(1) as usize;
         let line_count: u16 = text
             .split('\n')
             .map(|l| {
@@ -662,12 +644,12 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
                 }
             })
             .sum();
-        let scroll = line_count.saturating_sub(prompt_area.height);
-        let paragraph = Paragraph::new(text)
+        let scroll = line_count.saturating_sub(body_rect.height);
+        Paragraph::new(text)
             .style(Style::default().fg(TEXT))
             .wrap(Wrap { trim: false })
-            .scroll((scroll, 0));
-        paragraph.render(prompt_area, buf);
+            .scroll((scroll, 0))
+            .render(body_rect, buf);
     }
 
     // --- Agent tabs ---
@@ -999,6 +981,46 @@ mod tests {
                     "expected blank cell at ({x},{y}); body rows past row 1 must be empty"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn focused_prompt_wrapped_lines_align_to_value_column() {
+        let mut app = wizard_app();
+        if let Mode::NewAgent {
+            focus,
+            prompt,
+            prompt_mode,
+            ..
+        } = &mut app.mode
+        {
+            *focus = NewAgentFocus::Prompt;
+            *prompt = "a ".repeat(60);
+            *prompt_mode = PromptMode::Custom;
+        }
+        let area = Rect::new(0, 0, 50, 24);
+        let mut buf = Buffer::empty(area);
+        NewAgentPanelWidget::new(&app).render(area, &mut buf);
+
+        // Find the rows containing the prompt content (start with 'a').
+        let mut content_rows: Vec<u16> = Vec::new();
+        for y in 0..area.height {
+            let cell = buf[(LABEL_W, y)].symbol();
+            if cell == "a" {
+                content_rows.push(y);
+            }
+        }
+        assert!(
+            content_rows.len() >= 2,
+            "expected wrapped prompt to occupy multiple rows; saw {} rows",
+            content_rows.len()
+        );
+
+        // Every content row must start with 'a' at column LABEL_W (value column),
+        // and column LABEL_W - 1 (label column) must be blank.
+        for y in content_rows {
+            assert_eq!(buf[(LABEL_W, y)].symbol(), "a", "value column drift at y={y}");
+            assert_eq!(buf[(LABEL_W - 1, y)].symbol(), " ", "label column non-blank at y={y}");
         }
     }
 }
