@@ -392,7 +392,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         Constraint::Length(1),                                      // 1  Source
         Constraint::Length(if show_branch_toggle { 1 } else { 0 }), // 2  Branch toggle
         Constraint::Length(if show_gitlab_source { 1 } else { 0 }), // 3  Search
-        Constraint::Max(list_height),                               // 4  List
+        Constraint::Length(list_height),                            // 4  List
         Constraint::Length(1),                                      // 5  Divider 1
         Constraint::Length(if show_name_row { 1 } else { 0 }),      // 6  Name
         Constraint::Length(1),                                      // 7  Prompt label
@@ -630,13 +630,11 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             ("esc", "cancel"),
         ]),
     };
-    // Indent the hint line under the form's value column for visual
-    // continuity. The 2-col bump past `label_w` matches the inner offset every
-    // other row picks up from `focus_block` (1-col border + 1-col padding when
-    // focused; 2-col padding when unfocused).
-    let mut spans = vec![Span::raw(" ".repeat(LABEL_W as usize + 2))];
+    let (_l, hint_value) = split_row(chunks[12]);
+    let hint_inner = render_focus_frame(false, hint_value, buf);
+    let mut spans = Vec::new();
     spans.extend(hint_line.spans);
-    Paragraph::new(Line::from(spans)).render(chunks[12], buf);
+    Paragraph::new(Line::from(spans)).render(hint_inner, buf);
 }
 
 #[cfg(test)]
@@ -776,9 +774,7 @@ mod tests {
                 let mut matched = 0usize;
                 for x in 0..area.width {
                     let sym = buf[(x, y)].symbol();
-                    if sym.chars().count() == 1
-                        && sym.chars().next() == Some(needle_chars[matched])
-                    {
+                    if sym.chars().count() == 1 && sym.starts_with(needle_chars[matched]) {
                         if matched == 0 {
                             start_x = Some(x);
                         }
