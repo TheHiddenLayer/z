@@ -419,10 +419,7 @@ pub async fn create_worktree(
         .map_err(|e| format!("git failed: {e}"))?;
     if !check.status.success() {
         let stderr = String::from_utf8_lossy(&check.stderr);
-        return Err(format!(
-            "invalid branch name: {branch} ({})",
-            stderr.trim()
-        ));
+        return Err(format!("invalid branch name: {branch} ({})", stderr.trim()));
     }
 
     // Refuse to create a branch that already exists

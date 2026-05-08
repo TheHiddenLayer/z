@@ -328,7 +328,8 @@ fn install_panic_hook() {
 }
 
 /// Route a command. Attach is the only command that runs synchronously in
-/// the main loop (it has to suspend the TUI and hand the terminal to tmux);
+/// the main loop (it has to suspend the TUI and hand the terminal to tmux).
+/// Prompt editing also runs synchronously because `$EDITOR` owns the terminal;
 /// everything else is fire-and-forget via `execute`.
 async fn dispatch(
     cmd: Command,
@@ -341,9 +342,65 @@ async fn dispatch(
         Command::Attach(agent) => {
             suspend_and_attach(app, &agent, terminal, events, action_tx).await?;
         }
+        Command::EditPrompt { initial_prompt } => {
+            suspend_and_edit_prompt(app, initial_prompt, terminal, events, action_tx).await?;
+        }
         other => execute(other, action_tx),
     }
     Ok(())
+}
+
+fn prompt_editor_temp_path() -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("z-prompt-{}-{nanos}.md", std::process::id()))
+}
+
+fn prompt_editor_from_env() -> Result<String, String> {
+    std::env::var("EDITOR")
+        .map_err(|_| "$EDITOR is not set".to_string())
+        .and_then(|editor| {
+            if editor.trim().is_empty() {
+                Err("$EDITOR is empty".to_string())
+            } else {
+                Ok(editor)
+            }
+        })
+}
+
+fn run_prompt_editor_with(editor: &str, initial_prompt: &str) -> Result<String, String> {
+    if editor.trim().is_empty() {
+        return Err("$EDITOR is empty".to_string());
+    }
+
+    let path = prompt_editor_temp_path();
+    std::fs::write(&path, initial_prompt).map_err(|e| format!("write temp file: {e}"))?;
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("$EDITOR \"$1\"")
+        .arg("z-prompt-editor")
+        .arg(&path)
+        .env("EDITOR", editor)
+        .status()
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&path);
+            format!("launch editor: {e}")
+        })?;
+
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("editor exited with {status}"));
+    }
+
+    let edited = std::fs::read_to_string(&path).map_err(|e| {
+        let _ = std::fs::remove_file(&path);
+        format!("read temp file: {e}")
+    })?;
+    let _ = std::fs::remove_file(path);
+    Ok(edited)
 }
 
 fn stderr_tail(bytes: &[u8]) -> String {
@@ -724,7 +781,55 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
             });
         }
         Command::Attach(_) => unreachable!("Attach handled by dispatch"),
+        Command::EditPrompt { .. } => unreachable!("EditPrompt handled by dispatch"),
     }
+}
+
+async fn suspend_and_edit_prompt(
+    app: &mut App,
+    initial_prompt: String,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    events: &mut EventHandle,
+    action_tx: &mpsc::UnboundedSender<Action>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let editor = match prompt_editor_from_env() {
+        Ok(editor) => editor,
+        Err(error) => {
+            for cmd in app.update(Action::PromptEdited(Err(error))) {
+                execute(cmd, action_tx);
+            }
+            return Ok(());
+        }
+    };
+
+    events.stop();
+
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        DisableFocusChange,
+        LeaveAlternateScreen
+    )?;
+    terminal.show_cursor()?;
+
+    let result = run_prompt_editor_with(&editor, &initial_prompt);
+
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableFocusChange
+    )?;
+    terminal.hide_cursor()?;
+    terminal.clear()?;
+
+    events.restart();
+
+    for cmd in app.update(Action::PromptEdited(result)) {
+        execute(cmd, action_tx);
+    }
+
+    Ok(())
 }
 
 async fn suspend_and_attach(
@@ -787,6 +892,34 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prompt_editor_runs_editor_and_reads_file() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let script_path = std::env::temp_dir().join(format!(
+            "z-editor-test-{}-{}.sh",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut script = std::fs::File::create(&script_path).unwrap();
+        writeln!(script, "#!/bin/sh").unwrap();
+        writeln!(script, "printf 'edited prompt' > \"$1\"").unwrap();
+        drop(script);
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let edited = run_prompt_editor_with(script_path.to_str().unwrap(), "initial").unwrap();
+
+        assert_eq!(edited, "edited prompt");
+        let _ = std::fs::remove_file(script_path);
     }
 
     fn missing_repo(suffix: &str) -> std::path::PathBuf {

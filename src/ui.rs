@@ -492,7 +492,7 @@ mod tests {
     use super::*;
     use crate::agent::{Agent, AgentStatus};
     use crate::app::Action;
-    use crate::app::{BranchMode, Mode, NewAgentFocus, NewAgentSource, PromptMode, RemoteList};
+    use crate::app::{BranchMode, Mode, NewAgentFocus, NewAgentSource, RemoteList};
     use crate::config::Config;
     use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
@@ -576,7 +576,6 @@ mod tests {
             branch_mode,
             branches,
             branch_name,
-            prompt_mode,
             prompt,
             ..
         } = &mut app.mode
@@ -593,7 +592,6 @@ mod tests {
                 "fix/local-disk-pressure-cascade".into(),
             ];
             *branch_name = "z-0506-138-feature-task-wizard-layout-polish".into();
-            *prompt_mode = PromptMode::Custom;
             prompt.clear();
         }
         app
@@ -664,7 +662,7 @@ mod tests {
         let repo = text.find("Repo          \u{2502} myapp").expect(&text);
         let source = text.find("Source          issue  mr  branch").expect(&text);
         let search = text.find("Search          filter issues...").expect(&text);
-        let prompt = text.find("Prompt          default  custom").expect(&text);
+        let prompt = text.find("Prompt").expect(&text);
         let agent = text.find("Agent           claude  codex").expect(&text);
         assert!(
             repo < source && source < search && search < prompt && prompt < agent,
@@ -673,15 +671,16 @@ mod tests {
     }
 
     #[test]
-    fn new_agent_wizard_renders_prompt_and_agent_tabs() {
+    fn new_agent_wizard_renders_single_prompt_row_and_agent_tabs() {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
 
         let text = render_app(&app);
 
+        assert!(text.contains("Prompt"), "prompt row should render:\n{text}");
         assert!(
-            text.contains("Prompt          default  custom"),
-            "prompt mode should render as tabs:\n{text}"
+            !text.contains("default  custom"),
+            "prompt should not render mode tabs:\n{text}"
         );
         assert!(
             text.contains("Agent           claude  codex"),
@@ -690,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_prompt_is_collapsed_until_prompt_focus() {
+    fn issue_prompt_summary_shows_prompt_content() {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
         app.update(Action::GitlabIssuesLoaded {
@@ -706,16 +705,12 @@ mod tests {
         let text = render_app(&app);
 
         assert!(
-            text.contains("Prompt          default  custom"),
-            "wizard should show prompt mode tabs:\n{text}"
+            !text.contains("default  custom"),
+            "prompt should not render mode tabs:\n{text}"
         );
         assert!(
-            text.contains("generated from issue"),
-            "wizard should explain where the prompt came from:\n{text}"
-        );
-        assert!(
-            !text.contains("Work on GitLab issue #42"),
-            "generated prompt body should stay hidden until prompt focus:\n{text}"
+            text.contains("Work on GitLab issue #42"),
+            "prompt body should preview the prompt content:\n{text}"
         );
     }
 
@@ -746,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_prompt_summary_shows_prompt_content() {
+    fn prompt_summary_shows_prompt_content() {
         let mut app = branch_source_app();
         if let Mode::NewAgent { prompt, .. } = &mut app.mode {
             *prompt = "Refine wizard layout behavior".into();
@@ -756,11 +751,11 @@ mod tests {
 
         assert!(
             text.contains("Refine wizard layout behavior"),
-            "collapsed custom prompt should preview the prompt content:\n{text}"
+            "collapsed prompt should preview the prompt content:\n{text}"
         );
         assert!(
             !text.contains("custom prompt"),
-            "collapsed custom prompt should not repeat the selected tab name:\n{text}"
+            "collapsed prompt should not mention a prompt mode:\n{text}"
         );
     }
 

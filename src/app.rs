@@ -62,7 +62,8 @@ pub enum Action {
     TypeBackspace,
     FocusNext,
     FocusPrev,
-    ResetPrompt,
+    EditPrompt,
+    PromptEdited(Result<String, String>),
 
     // Agent lifecycle (trigger async side effects)
     KillSession(String),
@@ -159,12 +160,6 @@ pub enum RemoteList<T> {
     Loading,
     Loaded(Vec<T>),
     Failed(String),
-}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum PromptMode {
-    Generated,
-    Custom,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -264,7 +259,6 @@ fn select_issue_by_index(
     source_index: &mut usize,
     selected_issue: &mut Option<GitlabIssue>,
     prompt: &mut String,
-    prompt_mode: &PromptMode,
     branches: &[String],
     branch_name: &mut String,
     name_pristine: &mut bool,
@@ -272,9 +266,7 @@ fn select_issue_by_index(
     let issue = issues.get(index)?.clone();
     *source_index = index;
     *selected_issue = Some(issue.clone());
-    if matches!(prompt_mode, PromptMode::Generated) {
-        *prompt = crate::gitlab::issue_prompt(&issue);
-    }
+    *prompt = crate::gitlab::issue_prompt(&issue);
     let today = chrono_free_date_str();
     *branch_name = crate::gitlab::issue_branch_name(&issue, &today, branches);
     *name_pristine = true;
@@ -287,44 +279,30 @@ fn select_mr_by_index(
     source_index: &mut usize,
     selected_mr: &mut Option<GitlabMergeRequest>,
     prompt: &mut String,
-    prompt_mode: &PromptMode,
 ) -> Option<GitlabMergeRequest> {
     let mr = mrs.get(index)?.clone();
     *source_index = index;
     *selected_mr = Some(mr.clone());
-    if matches!(prompt_mode, PromptMode::Generated) {
-        *prompt = crate::gitlab::mr_prompt(&mr);
-    }
+    *prompt = crate::gitlab::mr_prompt(&mr);
     Some(mr)
 }
 
-fn reset_prompt_for_source(
+fn prompt_for_source(
     source: NewAgentSource,
     selected_issue: &Option<GitlabIssue>,
     selected_mr: &Option<GitlabMergeRequest>,
-    prompt: &mut String,
-    prompt_mode: &mut PromptMode,
-) {
+) -> String {
     match source {
-        NewAgentSource::Issue => {
-            if let Some(issue) = selected_issue.as_ref() {
-                *prompt = crate::gitlab::issue_prompt(issue);
-            } else {
-                prompt.clear();
-            }
-        }
-        NewAgentSource::Mr => {
-            if let Some(mr) = selected_mr.as_ref() {
-                *prompt = crate::gitlab::mr_prompt(mr);
-            } else {
-                prompt.clear();
-            }
-        }
-        NewAgentSource::Branch => {
-            prompt.clear();
-        }
+        NewAgentSource::Issue => selected_issue
+            .as_ref()
+            .map(crate::gitlab::issue_prompt)
+            .unwrap_or_default(),
+        NewAgentSource::Mr => selected_mr
+            .as_ref()
+            .map(crate::gitlab::mr_prompt)
+            .unwrap_or_default(),
+        NewAgentSource::Branch => String::new(),
     }
-    *prompt_mode = PromptMode::Generated;
 }
 
 fn issue_selection_is_visible(
@@ -428,6 +406,9 @@ pub enum Command {
         agent: Agent,
         fresh_cmd: String,
     },
+    EditPrompt {
+        initial_prompt: String,
+    },
 }
 
 // --- Mode ---
@@ -446,7 +427,6 @@ pub enum Mode {
         selected_mr: Option<GitlabMergeRequest>,
         branch_mode: BranchMode,
         prompt: String,
-        prompt_mode: PromptMode,
         focus: NewAgentFocus,
         base_index: usize,
         branches: Vec<String>,
@@ -754,7 +734,6 @@ impl App {
                     selected_mr: None,
                     branch_mode: BranchMode::New,
                     prompt: String::new(),
-                    prompt_mode: PromptMode::Generated,
                     focus: NewAgentFocus::Repo,
                     base_index: 0,
                     branches: Vec::new(),
@@ -810,7 +789,6 @@ impl App {
                         existing_branches,
                         agent_name,
                         prompt,
-                        prompt_mode,
                         branch_name,
                         name_pristine,
                         ..
@@ -834,6 +812,7 @@ impl App {
                                 }
                                 NewAgentSource::Branch => {}
                             }
+                            *prompt = prompt_for_source(*source, selected_issue, selected_mr);
                         }
                         NewAgentFocus::Agent => {
                             if let Some(n) = next_agent_name {
@@ -861,6 +840,7 @@ impl App {
                                     }
                                     NewAgentSource::Branch => {}
                                 }
+                                *prompt = prompt_for_source(*source, selected_issue, selected_mr);
                             }
                         }
                         NewAgentFocus::BranchToggle => {
@@ -895,7 +875,6 @@ impl App {
                                             source_index,
                                             selected_issue,
                                             prompt,
-                                            prompt_mode,
                                             branches,
                                             branch_name,
                                             name_pristine,
@@ -918,24 +897,11 @@ impl App {
                                             source_index,
                                             selected_mr,
                                             prompt,
-                                            prompt_mode,
                                         );
                                     }
                                 }
                             }
                             NewAgentSource::Branch => {}
-                        },
-                        NewAgentFocus::Prompt => match prompt_mode {
-                            PromptMode::Generated => {
-                                *prompt_mode = PromptMode::Custom;
-                            }
-                            PromptMode::Custom => reset_prompt_for_source(
-                                *source,
-                                selected_issue,
-                                selected_mr,
-                                prompt,
-                                prompt_mode,
-                            ),
                         },
                         _ => {}
                     },
@@ -984,7 +950,6 @@ impl App {
                         existing_branches,
                         agent_name,
                         prompt,
-                        prompt_mode,
                         branch_name,
                         name_pristine,
                         ..
@@ -1008,6 +973,7 @@ impl App {
                                 }
                                 NewAgentSource::Branch => {}
                             }
+                            *prompt = prompt_for_source(*source, selected_issue, selected_mr);
                         }
                         NewAgentFocus::Agent => {
                             if let Some(n) = prev_agent_name {
@@ -1035,6 +1001,7 @@ impl App {
                                     }
                                     NewAgentSource::Branch => {}
                                 }
+                                *prompt = prompt_for_source(*source, selected_issue, selected_mr);
                             }
                         }
                         NewAgentFocus::BranchToggle => {
@@ -1073,7 +1040,6 @@ impl App {
                                             source_index,
                                             selected_issue,
                                             prompt,
-                                            prompt_mode,
                                             branches,
                                             branch_name,
                                             name_pristine,
@@ -1100,24 +1066,11 @@ impl App {
                                             source_index,
                                             selected_mr,
                                             prompt,
-                                            prompt_mode,
                                         );
                                     }
                                 }
                             }
                             NewAgentSource::Branch => {}
-                        },
-                        NewAgentFocus::Prompt => match prompt_mode {
-                            PromptMode::Generated => {
-                                *prompt_mode = PromptMode::Custom;
-                            }
-                            PromptMode::Custom => reset_prompt_for_source(
-                                *source,
-                                selected_issue,
-                                selected_mr,
-                                prompt,
-                                prompt_mode,
-                            ),
                         },
                         _ => {}
                     },
@@ -1417,7 +1370,6 @@ impl App {
                     selected_issue,
                     selected_mr,
                     prompt,
-                    prompt_mode,
                     branches,
                     branch_name,
                     name_pristine,
@@ -1437,7 +1389,6 @@ impl App {
                                             source_index,
                                             selected_issue,
                                             prompt,
-                                            prompt_mode,
                                             branches,
                                             branch_name,
                                             name_pristine,
@@ -1456,17 +1407,12 @@ impl App {
                                             source_index,
                                             selected_mr,
                                             prompt,
-                                            prompt_mode,
                                         );
                                     }
                                 }
                             }
                             NewAgentSource::Branch => {}
                         }
-                    }
-                    NewAgentFocus::Prompt => {
-                        *prompt_mode = PromptMode::Custom;
-                        prompt.push(c);
                     }
                     NewAgentFocus::Name => {
                         if *name_pristine {
@@ -1490,7 +1436,6 @@ impl App {
                     selected_issue,
                     selected_mr,
                     prompt,
-                    prompt_mode,
                     branches,
                     branch_name,
                     name_pristine,
@@ -1510,7 +1455,6 @@ impl App {
                                             source_index,
                                             selected_issue,
                                             prompt,
-                                            prompt_mode,
                                             branches,
                                             branch_name,
                                             name_pristine,
@@ -1529,17 +1473,12 @@ impl App {
                                             source_index,
                                             selected_mr,
                                             prompt,
-                                            prompt_mode,
                                         );
                                     }
                                 }
                             }
                             NewAgentSource::Branch => {}
                         }
-                    }
-                    NewAgentFocus::Prompt => {
-                        *prompt_mode = PromptMode::Custom;
-                        prompt.pop();
                     }
                     NewAgentFocus::Name => {
                         if *name_pristine {
@@ -1882,25 +1821,28 @@ impl App {
                     *branches = new_branches;
                 }
             }
-            Action::ResetPrompt => {
+            Action::EditPrompt => {
                 if let Mode::NewAgent {
-                    source,
+                    focus: NewAgentFocus::Prompt,
                     prompt,
-                    prompt_mode,
-                    selected_issue,
-                    selected_mr,
                     ..
-                } = &mut self.mode
+                } = &self.mode
                 {
-                    reset_prompt_for_source(
-                        *source,
-                        selected_issue,
-                        selected_mr,
-                        prompt,
-                        prompt_mode,
-                    );
+                    cmds.push(Command::EditPrompt {
+                        initial_prompt: prompt.clone(),
+                    });
                 }
             }
+            Action::PromptEdited(result) => match result {
+                Ok(edited) => {
+                    if let Mode::NewAgent { prompt, .. } = &mut self.mode {
+                        *prompt = edited;
+                    }
+                }
+                Err(error) => {
+                    self.status_message = Some(format!("Prompt edit failed: {error}"));
+                }
+            },
             Action::GitlabIssuesLoaded { repo, result } => {
                 let accepts_result = match &self.mode {
                     Mode::NewAgent {
@@ -1921,7 +1863,6 @@ impl App {
                         selected_issue,
                         source_index,
                         prompt,
-                        prompt_mode,
                         branches,
                         branch_name,
                         name_pristine,
@@ -1936,18 +1877,14 @@ impl App {
                             *selected_issue = first.clone();
                             match first {
                                 Some(issue) => {
-                                    if matches!(prompt_mode, PromptMode::Generated) {
-                                        *prompt = crate::gitlab::issue_prompt(&issue);
-                                    }
+                                    *prompt = crate::gitlab::issue_prompt(&issue);
                                     let today = chrono_free_date_str();
                                     *branch_name =
                                         crate::gitlab::issue_branch_name(&issue, &today, branches);
                                     *name_pristine = true;
                                 }
                                 None => {
-                                    if matches!(prompt_mode, PromptMode::Generated) {
-                                        prompt.clear();
-                                    }
+                                    prompt.clear();
                                     let today = chrono_free_date_str();
                                     *branch_name = generate_branch_name(branches, &today);
                                     *name_pristine = true;
@@ -1957,9 +1894,7 @@ impl App {
                         Err(error) => {
                             *issues = RemoteList::Failed(error);
                             *selected_issue = None;
-                            if matches!(prompt_mode, PromptMode::Generated) {
-                                prompt.clear();
-                            }
+                            prompt.clear();
                             let today = chrono_free_date_str();
                             *branch_name = generate_branch_name(branches, &today);
                             *name_pristine = true;
@@ -1987,7 +1922,6 @@ impl App {
                         selected_mr,
                         source_index,
                         prompt,
-                        prompt_mode,
                         ..
                     } = &mut self.mode
                 {
@@ -1999,23 +1933,17 @@ impl App {
                             *selected_mr = first.clone();
                             match first {
                                 Some(mr) => {
-                                    if matches!(prompt_mode, PromptMode::Generated) {
-                                        *prompt = crate::gitlab::mr_prompt(&mr);
-                                    }
+                                    *prompt = crate::gitlab::mr_prompt(&mr);
                                 }
                                 None => {
-                                    if matches!(prompt_mode, PromptMode::Generated) {
-                                        prompt.clear();
-                                    }
+                                    prompt.clear();
                                 }
                             }
                         }
                         Err(error) => {
                             *mrs = RemoteList::Failed(error);
                             *selected_mr = None;
-                            if matches!(prompt_mode, PromptMode::Generated) {
-                                prompt.clear();
-                            }
+                            prompt.clear();
                         }
                     }
                 }
@@ -2356,7 +2284,7 @@ impl App {
                     if key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
                         && matches!(focus, NewAgentFocus::Prompt) =>
                 {
-                    Some(Action::TypeChar('\n'))
+                    None
                 }
                 KeyCode::Enter => Some(Action::PickerConfirm),
                 KeyCode::Tab => Some(Action::FocusNext),
@@ -2369,7 +2297,6 @@ impl App {
                             | NewAgentFocus::Agent
                             | NewAgentFocus::Repo
                             | NewAgentFocus::BranchToggle
-                            | NewAgentFocus::Prompt
                     ) =>
                 {
                     Some(Action::PickerPrev)
@@ -2381,7 +2308,6 @@ impl App {
                             | NewAgentFocus::Agent
                             | NewAgentFocus::Repo
                             | NewAgentFocus::BranchToggle
-                            | NewAgentFocus::Prompt
                     ) =>
                 {
                     Some(Action::PickerNext)
@@ -2407,36 +2333,25 @@ impl App {
                 {
                     Some(Action::PickerNext)
                 }
-                // Text fields: Search, Name, Prompt
+                // Text fields: Search, Name. Prompt text is edited through $EDITOR.
                 KeyCode::Backspace
-                    if matches!(
-                        focus,
-                        NewAgentFocus::Search | NewAgentFocus::Prompt | NewAgentFocus::Name
-                    ) =>
+                    if matches!(focus, NewAgentFocus::Search | NewAgentFocus::Name) =>
                 {
                     Some(Action::TypeBackspace)
                 }
-                KeyCode::Char('r')
+                KeyCode::Char('e')
                     if matches!(focus, NewAgentFocus::Prompt)
-                        && key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        && key.modifiers == crossterm::event::KeyModifiers::NONE =>
                 {
-                    Some(Action::ResetPrompt)
+                    Some(Action::EditPrompt)
                 }
                 KeyCode::Char('q')
-                    if !matches!(
-                        focus,
-                        NewAgentFocus::Search | NewAgentFocus::Prompt | NewAgentFocus::Name
-                    ) =>
+                    if !matches!(focus, NewAgentFocus::Search | NewAgentFocus::Name) =>
                 {
                     Some(Action::CancelMode)
                 }
                 KeyCode::Char(c)
-                    if matches!(
-                        focus,
-                        NewAgentFocus::Search | NewAgentFocus::Prompt | NewAgentFocus::Name
-                    ) =>
+                    if matches!(focus, NewAgentFocus::Search | NewAgentFocus::Name) =>
                 {
                     Some(Action::TypeChar(c))
                 }
@@ -2474,7 +2389,6 @@ mod tests {
                 mrs: RemoteList::Idle,
                 selected_issue: None,
                 selected_mr: None,
-                prompt_mode: PromptMode::Custom,
                 $($field: $value,)*
             }
         };
@@ -3376,163 +3290,17 @@ mod tests {
     }
 
     #[test]
-    fn typing_in_generated_prompt_marks_it_custom() {
+    fn type_char_action_does_not_edit_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            focus,
-            prompt,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
+        if let Mode::NewAgent { focus, prompt, .. } = &mut app.mode {
             *focus = NewAgentFocus::Prompt;
             *prompt = "generated".to_string();
-            *prompt_mode = PromptMode::Generated;
         }
 
         app.update(Action::TypeChar('!'));
 
-        if let Mode::NewAgent {
-            prompt,
-            prompt_mode,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(prompt, "generated!");
-            assert_eq!(*prompt_mode, PromptMode::Custom);
-        } else {
-            panic!("expected NewAgent mode");
-        }
-    }
-
-    #[test]
-    fn reset_prompt_regenerates_selected_issue_prompt() {
-        let mut app = test_app_in_new_agent_mode();
-        let selected = issue(1102, "Detect agents remotely");
-        if let Mode::NewAgent {
-            source,
-            selected_issue,
-            prompt,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
-            *source = NewAgentSource::Issue;
-            *selected_issue = Some(selected);
-            *prompt = "custom".to_string();
-            *prompt_mode = PromptMode::Custom;
-        }
-
-        app.update(Action::ResetPrompt);
-
-        if let Mode::NewAgent {
-            prompt,
-            prompt_mode,
-            ..
-        } = &app.mode
-        {
-            assert!(prompt.starts_with("Work on GitLab issue #1102"));
-            assert_eq!(*prompt_mode, PromptMode::Generated);
-        } else {
-            panic!("expected NewAgent mode");
-        }
-    }
-
-    #[test]
-    fn reset_pending_issue_prompt_allows_loaded_issue_to_generate_prompt() {
-        let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            selected_issue,
-            prompt,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
-            *source = NewAgentSource::Issue;
-            *selected_issue = None;
-            *prompt = "custom".to_string();
-            *prompt_mode = PromptMode::Custom;
-        }
-
-        app.update(Action::ResetPrompt);
-
-        if let Mode::NewAgent {
-            prompt,
-            prompt_mode,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(prompt, "");
-            assert_eq!(*prompt_mode, PromptMode::Generated);
-        } else {
-            panic!("expected NewAgent mode");
-        }
-
-        let current_repo = repo(&app, 0);
-        app.update(Action::GitlabIssuesLoaded {
-            repo: current_repo,
-            result: Ok(vec![issue(1102, "Detect agents remotely")]),
-        });
-
-        if let Mode::NewAgent {
-            prompt,
-            prompt_mode,
-            ..
-        } = &app.mode
-        {
-            assert!(prompt.starts_with("Work on GitLab issue #1102"));
-            assert_eq!(*prompt_mode, PromptMode::Generated);
-        } else {
-            panic!("expected NewAgent mode");
-        }
-    }
-
-    #[test]
-    fn reset_pending_mr_prompt_allows_loaded_mr_to_generate_prompt() {
-        let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            selected_mr,
-            prompt,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
-            *source = NewAgentSource::Mr;
-            *selected_mr = None;
-            *prompt = "custom".to_string();
-            *prompt_mode = PromptMode::Custom;
-        }
-
-        app.update(Action::ResetPrompt);
-
-        if let Mode::NewAgent {
-            prompt,
-            prompt_mode,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(prompt, "");
-            assert_eq!(*prompt_mode, PromptMode::Generated);
-        } else {
-            panic!("expected NewAgent mode");
-        }
-
-        let current_repo = repo(&app, 0);
-        app.update(Action::GitlabMrsLoaded {
-            repo: current_repo,
-            result: Ok(vec![mr(44, "Review remote detection", "review-remote")]),
-        });
-
-        if let Mode::NewAgent {
-            prompt,
-            prompt_mode,
-            ..
-        } = &app.mode
-        {
-            assert!(prompt.starts_with("Review GitLab MR !44"));
-            assert_eq!(*prompt_mode, PromptMode::Generated);
+        if let Mode::NewAgent { prompt, .. } = &app.mode {
+            assert_eq!(prompt, "generated");
         } else {
             panic!("expected NewAgent mode");
         }
@@ -3556,100 +3324,83 @@ mod tests {
     }
 
     #[test]
-    fn prompt_reset_key_uses_ctrl_r_in_prompt_focus() {
+    fn prompt_reset_key_is_unused() {
         let mut app = test_app_in_new_agent_mode();
         if let Mode::NewAgent { focus, .. } = &mut app.mode {
             *focus = NewAgentFocus::Prompt;
         }
 
-        assert!(matches!(
+        assert!(
             app.handle_key(make_key_with_modifiers(
                 KeyCode::Char('r'),
                 crossterm::event::KeyModifiers::CONTROL,
-            )),
-            Some(Action::ResetPrompt)
-        ));
-        assert!(matches!(
-            app.handle_key(make_key(KeyCode::Char('r'))),
-            Some(Action::TypeChar('r'))
-        ));
+            ))
+            .is_none()
+        );
+        assert!(app.handle_key(make_key(KeyCode::Char('r'))).is_none());
     }
 
     #[test]
-    fn prompt_tabs_left_right_map_to_picker() {
+    fn prompt_edit_key_opens_editor_in_prompt_focus() {
         let mut app = test_app_in_new_agent_mode();
         if let Mode::NewAgent { focus, .. } = &mut app.mode {
             *focus = NewAgentFocus::Prompt;
         }
 
         assert!(matches!(
-            app.handle_key(make_key(KeyCode::Right)),
-            Some(Action::PickerNext)
-        ));
-        assert!(matches!(
-            app.handle_key(make_key(KeyCode::Left)),
-            Some(Action::PickerPrev)
+            app.handle_key(make_key(KeyCode::Char('e'))),
+            Some(Action::EditPrompt)
         ));
     }
 
     #[test]
-    fn prompt_tabs_toggle_between_default_and_custom() {
+    fn edit_prompt_command_uses_current_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            focus,
-            selected_issue,
-            prompt,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
-            *source = NewAgentSource::Issue;
+        if let Mode::NewAgent { focus, prompt, .. } = &mut app.mode {
             *focus = NewAgentFocus::Prompt;
-            let selected = issue(42, "Fix task setup");
-            *selected_issue = Some(selected.clone());
-            *prompt = crate::gitlab::issue_prompt(&selected);
-            *prompt_mode = PromptMode::Generated;
+            *prompt = "generated prompt".to_string();
         }
 
-        app.update(Action::PickerNext);
-        if let Mode::NewAgent {
-            prompt,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
-            assert_eq!(*prompt_mode, PromptMode::Custom);
-            *prompt = "custom prompt".into();
+        let cmds = app.update(Action::EditPrompt);
+
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::EditPrompt { initial_prompt }] if initial_prompt == "generated prompt"
+        ));
+    }
+
+    #[test]
+    fn prompt_edited_replaces_prompt() {
+        let mut app = test_app_in_new_agent_mode();
+        if let Mode::NewAgent { prompt, .. } = &mut app.mode {
+            *prompt = "generated prompt".to_string();
+        }
+
+        app.update(Action::PromptEdited(Ok("edited prompt".to_string())));
+
+        if let Mode::NewAgent { prompt, .. } = &app.mode {
+            assert_eq!(prompt, "edited prompt");
         } else {
             panic!("expected NewAgent mode");
         }
+    }
 
-        app.update(Action::PickerPrev);
-        if let Mode::NewAgent {
-            prompt,
-            prompt_mode,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(*prompt_mode, PromptMode::Generated);
-            assert!(prompt.starts_with("Work on GitLab issue #42"));
-        } else {
-            panic!("expected NewAgent mode");
+    #[test]
+    fn prompt_left_right_are_unused() {
+        let mut app = test_app_in_new_agent_mode();
+        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+            *focus = NewAgentFocus::Prompt;
         }
+
+        assert!(app.handle_key(make_key(KeyCode::Right)).is_none());
+        assert!(app.handle_key(make_key(KeyCode::Left)).is_none());
     }
 
     #[test]
     fn gitlab_issues_loaded_selects_first_issue_and_generates_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
+        if let Mode::NewAgent { source, .. } = &mut app.mode {
             *source = NewAgentSource::Issue;
-            *prompt_mode = PromptMode::Generated;
         }
 
         let current_repo = repo(&app, 0);
@@ -3678,14 +3429,8 @@ mod tests {
     #[test]
     fn gitlab_mrs_loaded_selects_first_mr_and_generates_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
+        if let Mode::NewAgent { source, .. } = &mut app.mode {
             *source = NewAgentSource::Mr;
-            *prompt_mode = PromptMode::Generated;
         }
 
         let current_repo = repo(&app, 0);
@@ -3738,18 +3483,11 @@ mod tests {
     }
 
     #[test]
-    fn custom_prompt_survives_issue_selection() {
+    fn issue_selection_replaces_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            prompt,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
+        if let Mode::NewAgent { source, prompt, .. } = &mut app.mode {
             *source = NewAgentSource::Issue;
-            *prompt = "my custom prompt".to_string();
-            *prompt_mode = PromptMode::Custom;
+            *prompt = "old prompt".to_string();
         }
 
         let current_repo = repo(&app, 0);
@@ -3759,7 +3497,7 @@ mod tests {
         });
 
         if let Mode::NewAgent { prompt, .. } = &app.mode {
-            assert_eq!(prompt, "my custom prompt");
+            assert!(prompt.starts_with("Work on GitLab issue #1102"));
         } else {
             panic!("expected NewAgent mode");
         }
@@ -3772,14 +3510,12 @@ mod tests {
             source,
             issues,
             prompt,
-            prompt_mode,
             ..
         } = &mut app.mode
         {
             *source = NewAgentSource::Mr;
             *issues = RemoteList::Loading;
             *prompt = "review pending".to_string();
-            *prompt_mode = PromptMode::Generated;
         }
 
         let current_repo = repo(&app, 0);
@@ -3851,14 +3587,12 @@ mod tests {
             source,
             mrs,
             prompt,
-            prompt_mode,
             ..
         } = &mut app.mode
         {
             *source = NewAgentSource::Issue;
             *mrs = RemoteList::Loading;
             *prompt = "issue pending".to_string();
-            *prompt_mode = PromptMode::Generated;
         }
 
         let current_repo = repo(&app, 0);
@@ -3926,14 +3660,8 @@ mod tests {
     #[test]
     fn branches_loaded_preserves_issue_derived_branch_name_with_collision() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
+        if let Mode::NewAgent { source, .. } = &mut app.mode {
             *source = NewAgentSource::Issue;
-            *prompt_mode = PromptMode::Generated;
         }
         let selected = issue(1102, "Detect agents remotely");
         let current_repo = repo(&app, 0);
@@ -3968,7 +3696,6 @@ mod tests {
             issues,
             selected_issue,
             prompt,
-            prompt_mode,
             branch_name,
             branches,
             name_pristine,
@@ -3979,7 +3706,6 @@ mod tests {
             *issues = RemoteList::Loaded(vec![issue(1, "Old issue")]);
             *selected_issue = Some(issue(1, "Old issue"));
             *prompt = "Work on GitLab issue #1: Old issue".to_string();
-            *prompt_mode = PromptMode::Generated;
             *branch_name = "z-0409-1-old-issue".to_string();
             *branches = vec!["main".into()];
             *name_pristine = false;
@@ -4020,7 +3746,6 @@ mod tests {
             source,
             selected_issue,
             prompt,
-            prompt_mode,
             branch_name,
             branches,
             name_pristine,
@@ -4030,7 +3755,6 @@ mod tests {
             *source = NewAgentSource::Issue;
             *selected_issue = Some(issue(1, "Old issue"));
             *prompt = "Work on GitLab issue #1: Old issue".to_string();
-            *prompt_mode = PromptMode::Generated;
             *branch_name = "z-0409-1-old-issue".to_string();
             *branches = vec!["main".into()];
             *name_pristine = false;
@@ -4065,18 +3789,11 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_issue_failure_preserves_custom_prompt() {
+    fn gitlab_issue_failure_clears_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            prompt,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
+        if let Mode::NewAgent { source, prompt, .. } = &mut app.mode {
             *source = NewAgentSource::Issue;
-            *prompt = "keep this prompt".to_string();
-            *prompt_mode = PromptMode::Custom;
+            *prompt = "old prompt".to_string();
         }
 
         let current_repo = repo(&app, 0);
@@ -4086,7 +3803,7 @@ mod tests {
         });
 
         if let Mode::NewAgent { prompt, .. } = &app.mode {
-            assert_eq!(prompt, "keep this prompt");
+            assert_eq!(prompt, "");
         } else {
             panic!("expected NewAgent mode");
         }
@@ -4100,7 +3817,6 @@ mod tests {
             mrs,
             selected_mr,
             prompt,
-            prompt_mode,
             ..
         } = &mut app.mode
         {
@@ -4108,7 +3824,6 @@ mod tests {
             *mrs = RemoteList::Loaded(vec![mr(1, "Old MR", "old-mr")]);
             *selected_mr = Some(mr(1, "Old MR", "old-mr"));
             *prompt = "Review GitLab MR !1: Old MR".to_string();
-            *prompt_mode = PromptMode::Generated;
         }
 
         let current_repo = repo(&app, 0);
@@ -4139,14 +3854,12 @@ mod tests {
             source,
             selected_mr,
             prompt,
-            prompt_mode,
             ..
         } = &mut app.mode
         {
             *source = NewAgentSource::Mr;
             *selected_mr = Some(mr(1, "Old MR", "old-mr"));
             *prompt = "Review GitLab MR !1: Old MR".to_string();
-            *prompt_mode = PromptMode::Generated;
         }
 
         let current_repo = repo(&app, 0);
@@ -4171,23 +3884,20 @@ mod tests {
     }
 
     #[test]
-    fn prompt_edit_during_pending_issue_fetch_is_not_overwritten() {
+    fn loaded_issue_replaces_edited_prompt() {
         let mut app = test_app_in_new_agent_mode();
         if let Mode::NewAgent {
             source,
             focus,
-            prompt_mode,
             issues,
             ..
         } = &mut app.mode
         {
             *source = NewAgentSource::Issue;
             *focus = NewAgentFocus::Prompt;
-            *prompt_mode = PromptMode::Generated;
             *issues = RemoteList::Loading;
         }
-        app.update(Action::TypeChar('m'));
-        app.update(Action::TypeChar('y'));
+        app.update(Action::PromptEdited(Ok("my".to_string())));
 
         let current_repo = repo(&app, 0);
         app.update(Action::GitlabIssuesLoaded {
@@ -4195,14 +3905,8 @@ mod tests {
             result: Ok(vec![issue(1102, "Detect agents remotely")]),
         });
 
-        if let Mode::NewAgent {
-            prompt,
-            prompt_mode,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(prompt, "my");
-            assert_eq!(*prompt_mode, PromptMode::Custom);
+        if let Mode::NewAgent { prompt, .. } = &app.mode {
+            assert!(prompt.starts_with("Work on GitLab issue #1102"));
         } else {
             panic!("expected NewAgent mode");
         }
@@ -4294,7 +3998,6 @@ mod tests {
             source_index,
             issues,
             selected_issue,
-            prompt_mode,
             branches,
             branch_name,
             name_pristine,
@@ -4309,7 +4012,6 @@ mod tests {
                 issue(25, "Fix auth callback"),
             ]);
             *selected_issue = Some(issue(10, "Refresh dashboard"));
-            *prompt_mode = PromptMode::Generated;
             *branches = vec!["main".into()];
             *branch_name = "old-branch".into();
             *name_pristine = false;
@@ -4351,7 +4053,6 @@ mod tests {
             source_index,
             issues,
             selected_issue,
-            prompt_mode,
             branches,
             branch_name,
             name_pristine,
@@ -4367,7 +4068,6 @@ mod tests {
                 issue(25, "Fix auth callback"),
             ]);
             *selected_issue = Some(issue(10, "Refresh dashboard"));
-            *prompt_mode = PromptMode::Generated;
             *branches = vec!["main".into()];
             *branch_name = "old-branch".into();
             *name_pristine = false;
@@ -4406,7 +4106,6 @@ mod tests {
             issues,
             selected_issue,
             prompt,
-            prompt_mode,
             branches,
             branch_name,
             name_pristine,
@@ -4422,7 +4121,6 @@ mod tests {
             ]);
             *selected_issue = Some(issue(25, "Fix auth callback"));
             *prompt = "Work on GitLab issue #25: Fix auth callback".into();
-            *prompt_mode = PromptMode::Generated;
             *branches = vec!["main".into()];
             *branch_name = "z-0409-1-fix-auth-callback".into();
             *name_pristine = true;
@@ -4461,7 +4159,6 @@ mod tests {
             source_index,
             issues,
             selected_issue,
-            prompt_mode,
             branches,
             branch_name,
             name_pristine,
@@ -4478,7 +4175,6 @@ mod tests {
                 issue(12, "Auth UI"),
             ]);
             *selected_issue = Some(issue(10, "Auth API"));
-            *prompt_mode = PromptMode::Generated;
             *branches = vec!["main".into()];
             *branch_name = "old-branch".into();
             *name_pristine = false;
@@ -4515,7 +4211,6 @@ mod tests {
             source_index,
             mrs,
             selected_mr,
-            prompt_mode,
             ..
         } = &mut app.mode
         {
@@ -4529,7 +4224,6 @@ mod tests {
                 mr(32, "Auth UI", "fix/auth-ui"),
             ]);
             *selected_mr = Some(mr(30, "Auth API", "fix/auth-api"));
-            *prompt_mode = PromptMode::Generated;
         }
 
         app.update(Action::PickerNext);
@@ -4661,10 +4355,10 @@ mod tests {
     }
 
     #[test]
-    fn new_agent_typing_edits_prompt() {
+    fn new_agent_typing_does_not_edit_prompt_inline() {
         let app = test_app_in_new_agent_mode();
         let action = app.handle_key(make_key(KeyCode::Char('h')));
-        assert!(matches!(action, Some(Action::TypeChar('h'))));
+        assert!(action.is_none());
     }
 
     #[test]
@@ -4703,10 +4397,8 @@ mod tests {
             name_pristine: true,
             agent_name: "codex".to_string(),
         };
-        // Type "fix"
-        app.update(Action::TypeChar('f'));
-        app.update(Action::TypeChar('i'));
-        app.update(Action::TypeChar('x'));
+        // Edit prompt
+        app.update(Action::PromptEdited(Ok("fix".to_string())));
         // Confirm
         let cmds = app.update(Action::PickerConfirm);
         assert!(matches!(app.mode, Mode::Normal));
@@ -5701,7 +5393,6 @@ mod tests {
             selected_mr: None,
             branch_mode: BranchMode::New,
             prompt: "issue prompt".into(),
-            prompt_mode: PromptMode::Custom,
             focus: NewAgentFocus::Prompt,
             base_index: 0,
             branches: vec!["main".into()],
@@ -5746,7 +5437,6 @@ mod tests {
             selected_mr: None,
             branch_mode: BranchMode::New,
             prompt: "issue prompt".into(),
-            prompt_mode: PromptMode::Custom,
             focus: NewAgentFocus::Prompt,
             base_index: 0,
             branches: vec!["main".into()],
@@ -5780,7 +5470,6 @@ mod tests {
             selected_mr: None,
             branch_mode: BranchMode::New,
             prompt: "issue prompt".into(),
-            prompt_mode: PromptMode::Custom,
             focus: NewAgentFocus::Prompt,
             base_index: 0,
             branches: vec!["main".into()],
@@ -5822,7 +5511,6 @@ mod tests {
             )),
             branch_mode: BranchMode::New,
             prompt: "review prompt".into(),
-            prompt_mode: PromptMode::Custom,
             focus: NewAgentFocus::Prompt,
             base_index: 0,
             branches: vec!["main".into()],
@@ -5873,7 +5561,6 @@ mod tests {
             )),
             branch_mode: BranchMode::New,
             prompt: "review prompt".into(),
-            prompt_mode: PromptMode::Custom,
             focus: NewAgentFocus::Prompt,
             base_index: 0,
             branches: vec!["main".into()],
@@ -5911,7 +5598,6 @@ mod tests {
             )),
             branch_mode: BranchMode::New,
             prompt: "review prompt".into(),
-            prompt_mode: PromptMode::Custom,
             focus: NewAgentFocus::Prompt,
             base_index: 0,
             branches: vec!["main".into()],
@@ -5945,7 +5631,6 @@ mod tests {
             selected_mr: None,
             branch_mode: BranchMode::New,
             prompt: "issue prompt".into(),
-            prompt_mode: PromptMode::Custom,
             focus: NewAgentFocus::Prompt,
             base_index: 0,
             branches: vec!["main".into()],
@@ -5976,7 +5661,6 @@ mod tests {
             selected_mr: None,
             branch_mode: BranchMode::New,
             prompt: "review prompt".into(),
-            prompt_mode: PromptMode::Custom,
             focus: NewAgentFocus::Prompt,
             base_index: 0,
             branches: vec!["main".into()],
@@ -6779,10 +6463,10 @@ mod tests {
     }
 
     #[test]
-    fn newagent_prompt_j_still_types() {
+    fn newagent_prompt_j_does_not_type_inline() {
         let app = test_app_in_new_agent_mode();
         let action = app.handle_key(make_key(KeyCode::Char('j')));
-        assert!(matches!(action, Some(Action::TypeChar('j'))));
+        assert!(action.is_none());
     }
 
     #[test]
@@ -6805,10 +6489,23 @@ mod tests {
     }
 
     #[test]
-    fn newagent_prompt_q_still_types() {
+    fn newagent_prompt_q_cancels() {
         let app = test_app_in_new_agent_mode();
         let action = app.handle_key(make_key(KeyCode::Char('q')));
-        assert!(matches!(action, Some(Action::TypeChar('q'))));
+        assert!(matches!(action, Some(Action::CancelMode)));
+    }
+
+    #[test]
+    fn newagent_prompt_backspace_and_alt_enter_do_not_edit_inline() {
+        let app = test_app_in_new_agent_mode();
+        assert!(app.handle_key(make_key(KeyCode::Backspace)).is_none());
+        assert!(
+            app.handle_key(make_key_with_modifiers(
+                KeyCode::Enter,
+                crossterm::event::KeyModifiers::ALT
+            ))
+            .is_none()
+        );
     }
 
     #[test]

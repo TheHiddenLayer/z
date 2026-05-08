@@ -1,4 +1,4 @@
-use crate::app::{App, BranchMode, Mode, NewAgentFocus, NewAgentSource, PromptMode, RemoteList};
+use crate::app::{App, BranchMode, Mode, NewAgentFocus, NewAgentSource, RemoteList};
 use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
 use crate::style::{DIM, TEXT, footer_hint};
 use ratatui::{
@@ -57,24 +57,11 @@ fn source_label(source: NewAgentSource) -> &'static str {
     }
 }
 
-fn prompt_summary(
-    source: NewAgentSource,
-    prompt_mode: PromptMode,
-    prompt: &str,
-    max_width: u16,
-) -> String {
-    let summary = if matches!(prompt_mode, PromptMode::Custom) && !prompt.trim().is_empty() {
+fn prompt_summary(prompt: &str, max_width: u16) -> String {
+    let summary = if !prompt.trim().is_empty() {
         prompt.lines().next().unwrap_or("").trim()
-    } else if prompt.trim().is_empty() {
-        "optional prompt"
-    } else if matches!(prompt_mode, PromptMode::Custom) {
-        "custom prompt"
     } else {
-        match source {
-            NewAgentSource::Issue => "generated from issue",
-            NewAgentSource::Mr => "generated from MR",
-            NewAgentSource::Branch => "optional prompt",
-        }
+        "optional prompt"
     };
     truncate_end(summary, max_width as usize)
 }
@@ -214,11 +201,7 @@ fn render_divider(area: Rect, buf: &mut Buffer) {
 }
 
 fn render_remote_status(message: &str, area: Rect, buf: &mut Buffer) {
-    Paragraph::new(Span::styled(
-        message.to_string(),
-        Style::default().fg(DIM),
-    ))
-    .render(area, buf);
+    Paragraph::new(Span::styled(message.to_string(), Style::default().fg(DIM))).render(area, buf);
 }
 
 fn matches_source_query(label: &str, query: &str) -> bool {
@@ -345,7 +328,6 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         selected_mr: _,
         branch_mode,
         prompt,
-        prompt_mode,
         focus,
         base_index,
         branches,
@@ -424,11 +406,8 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     let (source_label_rect, source_value_rect) = split_row(chunks[1]);
     render_label("Source", is_source, source_label_rect, buf);
     let source_inner = render_focus_frame(is_source, source_value_rect, buf);
-    Paragraph::new(tab_value_line(
-        &["issue", "mr", "branch"],
-        source_selected,
-    ))
-    .render(source_inner, buf);
+    Paragraph::new(tab_value_line(&["issue", "mr", "branch"], source_selected))
+        .render(source_inner, buf);
 
     // --- Branch toggle row ---
     if show_branch_toggle {
@@ -470,10 +449,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     }
 
     let (_l, list_value) = split_row(list_area);
-    let list_focused = matches!(
-        focus,
-        NewAgentFocus::SourceList | NewAgentFocus::BranchList
-    );
+    let list_focused = matches!(focus, NewAgentFocus::SourceList | NewAgentFocus::BranchList);
     let list_inner = render_focus_frame(list_focused, list_value, buf);
     let payload = match source {
         NewAgentSource::Issue => issue_items(issues, source_query),
@@ -505,7 +481,9 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         let (name_label_rect, name_value_rect) = split_row(chunks[6]);
         render_label("Name", is_name, name_label_rect, buf);
         let name_inner = render_focus_frame(is_name, name_value_rect, buf);
-        let name_value_width = (name_inner.width as usize).max(1).min(MAX_TASK_NAME_WIDTH as usize);
+        let name_value_width = (name_inner.width as usize)
+            .max(1)
+            .min(MAX_TASK_NAME_WIDTH as usize);
         let name_display = if is_name && *name_pristine {
             // Pristine auto-suggested name: dim + italic so it reads as a
             // placeholder that will be replaced the moment the user types.
@@ -530,21 +508,17 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         let (name_label_rect, name_value_rect) = split_row(chunks[6]);
         render_label("Name", false, name_label_rect, buf);
         let name_inner = render_focus_frame(false, name_value_rect, buf);
-        let name_value_width = (name_inner.width as usize).max(1).min(MAX_TASK_NAME_WIDTH as usize);
+        let name_value_width = (name_inner.width as usize)
+            .max(1)
+            .min(MAX_TASK_NAME_WIDTH as usize);
         let name = truncate_middle(branch_name, name_value_width);
         Paragraph::new(Span::styled(name, Style::default().fg(TEXT))).render(name_inner, buf);
     }
 
-    // --- Prompt tabs ---
-    let prompt_selected = match prompt_mode {
-        PromptMode::Generated => 0,
-        PromptMode::Custom => 1,
-    };
+    // --- Prompt label ---
     let (prompt_label_rect, prompt_value_rect) = split_row(chunks[7]);
     render_label("Prompt", is_prompt, prompt_label_rect, buf);
-    let prompt_label_inner = render_focus_frame(is_prompt, prompt_value_rect, buf);
-    Paragraph::new(tab_value_line(&["default", "custom"], prompt_selected))
-        .render(prompt_label_inner, buf);
+    let _ = render_focus_frame(is_prompt, prompt_value_rect, buf);
 
     // --- Prompt area ---
     // chunks[8] is exactly `PROMPT_BODY_HEIGHT` rows; trailing slack is
@@ -552,15 +526,10 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     let (_label, body_rect) = split_row(chunks[8]);
     let body_inner = render_focus_frame(is_prompt, body_rect, buf);
     if !is_prompt {
-        let summary = prompt_summary(*source, *prompt_mode, prompt, body_inner.width);
-        Paragraph::new(Span::styled(summary, Style::default().fg(DIM)))
-            .render(body_inner, buf);
-    } else if prompt.is_empty() {
-        let placeholder = Span::styled("_", Style::default().fg(TEXT));
-        Paragraph::new(placeholder).render(body_inner, buf);
+        let summary = prompt_summary(prompt, body_inner.width);
+        Paragraph::new(Span::styled(summary, Style::default().fg(DIM))).render(body_inner, buf);
     } else {
-        let cursor = "_";
-        let text = format!("{prompt}{cursor}");
+        let text = prompt.as_str();
         let width = body_inner.width.max(1) as usize;
         let line_count: u16 = text
             .split('\n')
@@ -595,8 +564,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     let (agent_label_rect, agent_value_rect) = split_row(chunks[10]);
     render_label("Agent", is_agent, agent_label_rect, buf);
     let agent_inner = render_focus_frame(is_agent, agent_value_rect, buf);
-    Paragraph::new(tab_value_line(&agent_options, agent_selected))
-        .render(agent_inner, buf);
+    Paragraph::new(tab_value_line(&agent_options, agent_selected)).render(agent_inner, buf);
 
     // --- Group dividers ---
     render_divider(chunks[5], buf);
@@ -623,12 +591,9 @@ pub(crate) fn wizard_hint(focus: &NewAgentFocus) -> Line<'static> {
             ("tab", "next"),
         ]),
         NewAgentFocus::Name => footer_hint(&[("tab", "next"), ("esc", "cancel")]),
-        NewAgentFocus::Prompt => footer_hint(&[
-            ("enter", "start"),
-            ("alt+enter", "newline"),
-            ("ctrl+r", "reset"),
-            ("esc", "cancel"),
-        ]),
+        NewAgentFocus::Prompt => {
+            footer_hint(&[("enter", "start"), ("e", "edit"), ("esc", "cancel")])
+        }
     }
 }
 
@@ -740,11 +705,8 @@ mod tests {
         } = &mut app.mode
         {
             *source = NewAgentSource::Issue;
-            *issues = RemoteList::Loaded(vec![
-                issue(1, "alpha"),
-                issue(2, "beta"),
-                issue(3, "gamma"),
-            ]);
+            *issues =
+                RemoteList::Loaded(vec![issue(1, "alpha"), issue(2, "beta"), issue(3, "gamma")]);
             *source_index = 0;
             *focus = NewAgentFocus::SourceList;
         }
@@ -813,7 +775,6 @@ mod tests {
             selected_mr: None,
             branch_mode: BranchMode::New,
             prompt: String::new(),
-            prompt_mode: PromptMode::Custom,
             focus: NewAgentFocus::Prompt,
             base_index: 0,
             branches: vec!["main".into()],
@@ -837,7 +798,10 @@ mod tests {
         buf
     }
 
-    fn cells_outside_columns(buf: &Buffer, skip_cols: std::ops::Range<u16>) -> Vec<(u16, u16, String)> {
+    fn cells_outside_columns(
+        buf: &Buffer,
+        skip_cols: std::ops::Range<u16>,
+    ) -> Vec<(u16, u16, String)> {
         let mut out = Vec::new();
         let area = *buf.area();
         for y in area.top()..area.bottom() {
@@ -875,16 +839,9 @@ mod tests {
     #[test]
     fn collapsed_prompt_summary_renders_in_first_body_row_only() {
         let mut app = wizard_app();
-        if let Mode::NewAgent {
-            focus,
-            prompt,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
+        if let Mode::NewAgent { focus, prompt, .. } = &mut app.mode {
             *focus = NewAgentFocus::Repo;
             *prompt = "describe the work".to_string();
-            *prompt_mode = PromptMode::Custom;
         }
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
@@ -920,6 +877,24 @@ mod tests {
     }
 
     #[test]
+    fn focused_empty_prompt_does_not_render_inline_cursor() {
+        let app = wizard_app();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        NewAgentPanelWidget::new(&app).render(area, &mut buf);
+
+        for y in 0..area.height {
+            for x in 0..area.width {
+                assert_ne!(
+                    buf[(x, y)].symbol(),
+                    "_",
+                    "prompt should be edited through $EDITOR, not an inline cursor"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn two_group_dividers_render_horizontal_rules() {
         let app = wizard_app();
         let area = Rect::new(0, 0, 80, 24);
@@ -928,7 +903,9 @@ mod tests {
 
         let mut divider_rows = 0;
         for y in 0..area.height {
-            let row: String = (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            let row: String = (0..area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
             if row.chars().filter(|c| *c == '─').count() >= (area.width as usize - 4) {
                 divider_rows += 1;
             }
@@ -939,16 +916,9 @@ mod tests {
     #[test]
     fn focused_prompt_wrapped_lines_align_to_value_column() {
         let mut app = wizard_app();
-        if let Mode::NewAgent {
-            focus,
-            prompt,
-            prompt_mode,
-            ..
-        } = &mut app.mode
-        {
+        if let Mode::NewAgent { focus, prompt, .. } = &mut app.mode {
             *focus = NewAgentFocus::Prompt;
             *prompt = "a ".repeat(60);
-            *prompt_mode = PromptMode::Custom;
         }
         let area = Rect::new(0, 0, 50, 24);
         let mut buf = Buffer::empty(area);
