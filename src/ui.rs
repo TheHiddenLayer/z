@@ -16,28 +16,13 @@ use crate::style::{
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
-    ])
-    .split(area);
-    Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
-    ])
-    .split(vertical[1])[1]
-}
-
 pub fn draw(frame: &mut Frame, app: &App) {
     let inner = frame.area().inner(Margin {
         vertical: 1,
         horizontal: 3,
     });
 
-    let chunks = Layout::vertical([
+    let layout = Layout::vertical([
         Constraint::Min(1),                     // preview pane
         Constraint::Length(1),                  // breathing room above separator
         Constraint::Length(1),                  // horizontal separator
@@ -45,32 +30,41 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Constraint::Length(AGENT_TABLE_HEIGHT), // agent table: header + gap + 4 rows
         Constraint::Length(1),                  // breathing room above status bar
         Constraint::Length(1),                  // status bar
-    ])
-    .split(inner);
+    ]);
+    let [
+        preview_pane,
+        _above_separator,
+        separator,
+        _below_separator,
+        agent_table,
+        _above_status,
+        status_bar,
+    ] = inner.layout(&layout);
 
     if matches!(app.mode, Mode::NewAgent { .. }) {
         let widget = NewAgentPanelWidget::new(app);
-        frame.render_widget(&widget, chunks[0]);
+        frame.render_widget(&widget, preview_pane);
     } else {
-        draw_preview(frame, app, chunks[0]);
+        draw_preview(frame, app, preview_pane);
     }
 
-    // chunks[1] is empty breathing room above separator
-    draw_separator(frame, app, chunks[2]);
-    // chunks[3] is empty breathing room below separator
-    draw_agent_table(frame, app, chunks[4]);
-    // chunks[5] is empty breathing room above status bar
-    draw_status_bar(frame, app, chunks[6]);
+    draw_separator(frame, app, separator);
+    draw_agent_table(frame, app, agent_table);
+    draw_status_bar(frame, app, status_bar);
 
     // Modal overlays
     match &app.mode {
         Mode::ConfirmDelete => {
-            let modal_area = centered_rect(52, 28, frame.area());
+            let modal_area = frame
+                .area()
+                .centered(Constraint::Percentage(52), Constraint::Percentage(28));
             frame.render_widget(Clear, modal_area);
             draw_delete_modal(frame, app, modal_area);
         }
         Mode::ConfirmMerge { .. } => {
-            let modal_area = centered_rect(54, 26, frame.area());
+            let modal_area = frame
+                .area()
+                .centered(Constraint::Percentage(54), Constraint::Percentage(26));
             frame.render_widget(Clear, modal_area);
             draw_merge_modal(frame, app, modal_area);
         }
@@ -378,15 +372,15 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     let name = agent.map(|a| a.branch.as_str()).unwrap_or("?");
     let has_session = agent.is_some_and(|a| a.status.has_session());
 
-    let chunks = Layout::vertical([
+    let layout = Layout::vertical([
         Constraint::Length(1), // top padding
         Constraint::Length(1), // line 1
         Constraint::Length(1), // line 2
         Constraint::Length(1), // line 3
         Constraint::Min(0),    // spacer
         Constraint::Length(1), // hint bar
-    ])
-    .split(inner);
+    ]);
+    let [_top_padding, line_1, line_2, line_3, _spacer, hint_bar] = inner.layout(&layout);
 
     let msg1 = Line::from(Span::styled(
         "  Delete worktree and branch for",
@@ -408,9 +402,9 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(DIM),
         ))
     };
-    frame.render_widget(Paragraph::new(msg1), chunks[1]);
-    frame.render_widget(Paragraph::new(msg2), chunks[2]);
-    frame.render_widget(Paragraph::new(msg3), chunks[3]);
+    frame.render_widget(Paragraph::new(msg1), line_1);
+    frame.render_widget(Paragraph::new(msg2), line_2);
+    frame.render_widget(Paragraph::new(msg3), line_3);
 
     let hint = if has_session {
         footer_hint(&[
@@ -423,7 +417,7 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     };
     let mut spans = vec![Span::raw("  ")];
     spans.extend(hint.spans);
-    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[5]);
+    frame.render_widget(Paragraph::new(Line::from(spans)), hint_bar);
 }
 
 fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
@@ -447,22 +441,29 @@ fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
         .map(|iid| format!("!{iid}"))
         .unwrap_or_else(|_| id_or_branch.clone());
 
-    let chunks = Layout::vertical([
+    let layout = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
-    ])
-    .split(inner);
+    ]);
+    let [
+        _top_padding,
+        prompt_row,
+        mr_row,
+        detail_row,
+        _spacer,
+        hint_bar,
+    ] = inner.layout(&layout);
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "  Merge this merge request?",
             Style::default().fg(TEXT),
         ))),
-        chunks[1],
+        prompt_row,
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -471,20 +472,20 @@ fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(" ", Style::default().fg(DIM)),
             Span::styled(title.clone(), Style::default().fg(TEXT)),
         ])),
-        chunks[2],
+        mr_row,
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "  glab will merge it upstream.",
             Style::default().fg(DIM),
         ))),
-        chunks[3],
+        detail_row,
     );
 
     let hint = footer_hint(&[("y", "merge"), ("q/esc", "cancel")]);
     let mut spans = vec![Span::raw("  ")];
     spans.extend(hint.spans);
-    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[5]);
+    frame.render_widget(Paragraph::new(Line::from(spans)), hint_bar);
 }
 
 #[cfg(test)]
