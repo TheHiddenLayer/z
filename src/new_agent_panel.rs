@@ -7,8 +7,8 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph,
-        StatefulWidget, Widget, Wrap,
+        Block, BorderType, Borders, HighlightSpacing, List, ListItem, ListState, Padding,
+        Paragraph, StatefulWidget, Widget, Wrap,
     },
 };
 
@@ -196,6 +196,7 @@ fn tab_value_line(options: &[&str], selected: usize) -> Line<'static> {
 fn render_divider(area: Rect, buf: &mut Buffer) {
     Block::new()
         .borders(Borders::TOP)
+        .border_type(BorderType::LightTripleDashed)
         .border_style(Style::default().fg(DIM))
         .render(area, buf);
 }
@@ -384,14 +385,25 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         Constraint::Min(0),                                         // 11 Trailing slack
     ];
 
-    let chunks = Layout::vertical(constraints)
-        .flex(Flex::Start)
-        .spacing(0)
-        .split(inner);
+    let layout = Layout::vertical(constraints).flex(Flex::Start).spacing(0);
+    let [
+        repo_row,
+        source_row,
+        branch_toggle_row,
+        search_row,
+        list_area,
+        divider_1_row,
+        name_row,
+        prompt_label_row,
+        prompt_body_row,
+        divider_2_row,
+        agent_row,
+        _trailing_slack,
+    ] = inner.layout(&layout);
 
     // --- Repo row ---
     let is_repo = matches!(focus, NewAgentFocus::Repo);
-    let (repo_label_rect, repo_value_rect) = split_row(chunks[0]);
+    let (repo_label_rect, repo_value_rect) = split_row(repo_row);
     render_label("Repo", is_repo, repo_label_rect, buf);
     let repo_inner = render_focus_frame(is_repo, repo_value_rect, buf);
     render_value(repo_name, is_repo, repo_inner, buf);
@@ -403,7 +415,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         NewAgentSource::Mr => 1,
         NewAgentSource::Branch => 2,
     };
-    let (source_label_rect, source_value_rect) = split_row(chunks[1]);
+    let (source_label_rect, source_value_rect) = split_row(source_row);
     render_label("Source", is_source, source_label_rect, buf);
     let source_inner = render_focus_frame(is_source, source_value_rect, buf);
     Paragraph::new(tab_value_line(&["issue", "mr", "branch"], source_selected))
@@ -416,17 +428,16 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             BranchMode::New => "New",
             BranchMode::Existing => "Existing",
         };
-        let (toggle_label_rect, toggle_value_rect) = split_row(chunks[2]);
+        let (toggle_label_rect, toggle_value_rect) = split_row(branch_toggle_row);
         render_label("Branch", is_toggle, toggle_label_rect, buf);
         let toggle_inner = render_focus_frame(is_toggle, toggle_value_rect, buf);
         render_value(mode_label, is_toggle, toggle_inner, buf);
     }
 
     // --- Source or branch list ---
-    let list_area = chunks[4];
     if show_gitlab_source {
         let is_search = matches!(focus, NewAgentFocus::Search);
-        let (search_label_rect, search_value_rect) = split_row(chunks[3]);
+        let (search_label_rect, search_value_rect) = split_row(search_row);
         render_label("Search", is_search, search_label_rect, buf);
         let (search_value_text, search_value_style) = if source_query.is_empty() {
             let placeholder = match source {
@@ -478,7 +489,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     // --- Name row ---
     if show_name {
         let is_name = matches!(focus, NewAgentFocus::Name);
-        let (name_label_rect, name_value_rect) = split_row(chunks[6]);
+        let (name_label_rect, name_value_rect) = split_row(name_row);
         render_label("Name", is_name, name_label_rect, buf);
         let name_inner = render_focus_frame(is_name, name_value_rect, buf);
         let name_value_width = (name_inner.width as usize)
@@ -505,7 +516,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         };
         Paragraph::new(Line::from(name_display)).render(name_inner, buf);
     } else if show_issue_name {
-        let (name_label_rect, name_value_rect) = split_row(chunks[6]);
+        let (name_label_rect, name_value_rect) = split_row(name_row);
         render_label("Name", false, name_label_rect, buf);
         let name_inner = render_focus_frame(false, name_value_rect, buf);
         let name_value_width = (name_inner.width as usize)
@@ -516,14 +527,14 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     }
 
     // --- Prompt label ---
-    let (prompt_label_rect, prompt_value_rect) = split_row(chunks[7]);
+    let (prompt_label_rect, prompt_value_rect) = split_row(prompt_label_row);
     render_label("Prompt", is_prompt, prompt_label_rect, buf);
     let _ = render_focus_frame(is_prompt, prompt_value_rect, buf);
 
     // --- Prompt area ---
-    // chunks[8] is exactly `PROMPT_BODY_HEIGHT` rows; trailing slack is
+    // `prompt_body_row` is exactly `PROMPT_BODY_HEIGHT` rows; trailing slack is
     // absorbed by the synthetic `Min(0)` row at the bottom of the layout.
-    let (_label, body_rect) = split_row(chunks[8]);
+    let (_label, body_rect) = split_row(prompt_body_row);
     let body_inner = render_focus_frame(is_prompt, body_rect, buf);
     if !is_prompt {
         let summary = prompt_summary(prompt, body_inner.width);
@@ -561,14 +572,14 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         .iter()
         .position(|name| *name == agent_name)
         .unwrap_or(0);
-    let (agent_label_rect, agent_value_rect) = split_row(chunks[10]);
+    let (agent_label_rect, agent_value_rect) = split_row(agent_row);
     render_label("Agent", is_agent, agent_label_rect, buf);
     let agent_inner = render_focus_frame(is_agent, agent_value_rect, buf);
     Paragraph::new(tab_value_line(&agent_options, agent_selected)).render(agent_inner, buf);
 
     // --- Group dividers ---
-    render_divider(chunks[5], buf);
-    render_divider(chunks[9], buf);
+    render_divider(divider_1_row, buf);
+    render_divider(divider_2_row, buf);
 }
 
 /// Per-focus hint line for the wizard, surfaced by the global status bar
@@ -895,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn two_group_dividers_render_horizontal_rules() {
+    fn two_group_dividers_render_light_triple_dashed_rules() {
         let app = wizard_app();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
@@ -906,11 +917,14 @@ mod tests {
             let row: String = (0..area.width)
                 .map(|x| buf[(x, y)].symbol().to_string())
                 .collect();
-            if row.chars().filter(|c| *c == '─').count() >= (area.width as usize - 4) {
+            if row.chars().filter(|c| *c == '┄').count() >= (area.width as usize - 4) {
                 divider_rows += 1;
             }
         }
-        assert_eq!(divider_rows, 2, "expected exactly two group dividers");
+        assert_eq!(
+            divider_rows, 2,
+            "expected exactly two light triple dashed group dividers"
+        );
     }
 
     #[test]
