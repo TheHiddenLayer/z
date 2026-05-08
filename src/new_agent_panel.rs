@@ -3,12 +3,12 @@ use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
 use crate::style::{DIM, TEXT, footer_hint};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Flex, Layout, Rect},
+    layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, HighlightSpacing, List, ListItem, ListState, Padding,
-        Paragraph, StatefulWidget, Widget, Wrap,
+        Block, BorderType, Borders, List, ListItem, ListState, Padding, Paragraph,
+        StatefulWidget, Widget, Wrap,
     },
 };
 
@@ -141,7 +141,10 @@ fn render_label(text: &str, focused: bool, area: Rect, buf: &mut Buffer) {
     } else {
         Style::default().fg(DIM)
     };
-    Paragraph::new(Span::styled(text.to_string(), style)).render(area, buf);
+    Paragraph::new(Span::styled(text.to_string(), style))
+        .alignment(Alignment::Right)
+        .block(Block::new().padding(Padding::right(1)))
+        .render(area, buf);
 }
 
 /// Wraps a row's value sub-rect with a focus accent bar on focus, or a 2-col
@@ -378,11 +381,10 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         Constraint::Length(list_height),                            // 4  List
         Constraint::Length(1),                                      // 5  Divider 1
         Constraint::Length(if show_name_row { 1 } else { 0 }),      // 6  Name
-        Constraint::Length(1),                                      // 7  Prompt label
-        Constraint::Length(PROMPT_BODY_HEIGHT),                     // 8  Prompt body
-        Constraint::Length(1),                                      // 9  Divider 2
-        Constraint::Length(1),                                      // 10 Agent
-        Constraint::Min(0),                                         // 11 Trailing slack
+        Constraint::Length(PROMPT_BODY_HEIGHT),                     // 7  Prompt (label + body)
+        Constraint::Length(1),                                      // 8  Divider 2
+        Constraint::Length(1),                                      // 9  Agent
+        Constraint::Min(0),                                         // 10 Trailing slack
     ];
 
     let layout = Layout::vertical(constraints).flex(Flex::Start).spacing(0);
@@ -394,8 +396,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         list_area,
         divider_1_row,
         name_row,
-        prompt_label_row,
-        prompt_body_row,
+        prompt_row,
         divider_2_row,
         agent_row,
         _trailing_slack,
@@ -424,14 +425,15 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     // --- Branch toggle row ---
     if show_branch_toggle {
         let is_toggle = matches!(focus, NewAgentFocus::BranchToggle);
-        let mode_label = match branch_mode {
-            BranchMode::New => "New",
-            BranchMode::Existing => "Existing",
+        let toggle_selected = match branch_mode {
+            BranchMode::New => 0,
+            BranchMode::Existing => 1,
         };
         let (toggle_label_rect, toggle_value_rect) = split_row(branch_toggle_row);
         render_label("Branch", is_toggle, toggle_label_rect, buf);
         let toggle_inner = render_focus_frame(is_toggle, toggle_value_rect, buf);
-        render_value(mode_label, is_toggle, toggle_inner, buf);
+        Paragraph::new(tab_value_line(&["new", "existing"], toggle_selected))
+            .render(toggle_inner, buf);
     }
 
     // --- Source or branch list ---
@@ -478,9 +480,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             let items: Vec<ListItem> = labels.into_iter().map(ListItem::new).collect();
             let list = List::new(items)
                 .style(Style::default().fg(DIM))
-                .highlight_style(Style::default().fg(TEXT).add_modifier(Modifier::BOLD))
-                .highlight_symbol("\u{258C} ")
-                .highlight_spacing(HighlightSpacing::Always);
+                .highlight_style(Style::default().fg(TEXT).add_modifier(Modifier::BOLD));
             let mut state = ListState::default().with_selected(selected_pos);
             StatefulWidget::render(list, list_inner, buf, &mut state);
         }
@@ -526,15 +526,11 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         Paragraph::new(Span::styled(name, Style::default().fg(TEXT))).render(name_inner, buf);
     }
 
-    // --- Prompt label ---
-    let (prompt_label_rect, prompt_value_rect) = split_row(prompt_label_row);
+    // --- Prompt (label + body share one PROMPT_BODY_HEIGHT row so the label
+    // top-aligns with the first body line). Label paragraph occupies the full
+    // label column rect; only the first row holds glyphs.
+    let (prompt_label_rect, body_rect) = split_row(prompt_row);
     render_label("Prompt", is_prompt, prompt_label_rect, buf);
-    let _ = render_focus_frame(is_prompt, prompt_value_rect, buf);
-
-    // --- Prompt area ---
-    // `prompt_body_row` is exactly `PROMPT_BODY_HEIGHT` rows; trailing slack is
-    // absorbed by the synthetic `Min(0)` row at the bottom of the layout.
-    let (_label, body_rect) = split_row(prompt_body_row);
     let body_inner = render_focus_frame(is_prompt, body_rect, buf);
     if !is_prompt {
         let summary = prompt_summary(prompt, body_inner.width);

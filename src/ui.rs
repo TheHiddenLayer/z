@@ -645,7 +645,7 @@ mod tests {
         let text = render_app(&app);
 
         assert!(
-            text.contains("Source          issue  mr  branch"),
+            text.contains("Source   issue  mr  branch"),
             "source choice should expose all start modes as tabs:\n{text}"
         );
     }
@@ -657,14 +657,15 @@ mod tests {
 
         let text = render_app(&app);
 
-        // Repo is focused on StartNewAgent → focus accent bar `│` sits at
-        // LABEL_W with one padding column before the value. Other rows are
-        // unfocused → 2 blank padding cols before the value.
-        let repo = text.find("Repo          \u{2502} myapp").expect(&text);
-        let source = text.find("Source          issue  mr  branch").expect(&text);
-        let search = text.find("Search          filter issues...").expect(&text);
+        // Labels right-aligned within LABEL_W with a 1-col right gutter.
+        // Repo is focused → focus accent bar `│` sits at LABEL_W with one
+        // padding col before the value. Other rows are unfocused → 2 blank
+        // padding cols before the value, so 3 blanks separate label and value.
+        let repo = text.find("Repo \u{2502} myapp").expect(&text);
+        let source = text.find("Source   issue  mr  branch").expect(&text);
+        let search = text.find("Search   filter issues...").expect(&text);
         let prompt = text.find("Prompt").expect(&text);
-        let agent = text.find("Agent           claude  codex").expect(&text);
+        let agent = text.find("Agent   claude  codex").expect(&text);
         assert!(
             repo < source && source < search && search < prompt && prompt < agent,
             "wizard controls should be ordered Repo, Source, Search/options, Prompt, Agent:\n{text}"
@@ -684,7 +685,7 @@ mod tests {
             "prompt should not render mode tabs:\n{text}"
         );
         assert!(
-            text.contains("Agent           claude  codex"),
+            text.contains("Agent   claude  codex"),
             "agent choice should render as tabs:\n{text}"
         );
     }
@@ -718,10 +719,9 @@ mod tests {
     #[test]
     fn branch_wizard_locks_prompt_body_to_three_rows_when_unfocused() {
         // The wizard's prompt body is fixed at PROMPT_BODY_HEIGHT (3) rows
-        // regardless of focus, per the layout-redesign spec. With the group
-        // divider between the prompt body and the agent row, the agent row
-        // lands exactly 5 rows below the prompt-label row:
-        //   prompt label (1) + prompt body (3) + divider (1) = 5.
+        // regardless of focus. The label shares the body's first row (top-
+        // aligned), so the agent row lands exactly 4 rows below the prompt
+        // row: prompt (3) + divider (1) = 4.
         let app = branch_source_app();
         let text = render_app(&app);
         let lines: Vec<&str> = text.lines().collect();
@@ -736,8 +736,8 @@ mod tests {
 
         assert_eq!(
             agent_row.saturating_sub(prompt_row),
-            5,
-            "prompt body should always reserve 3 rows with a divider beneath; agent must sit 5 rows below the prompt label:\n{text}"
+            4,
+            "prompt body should always reserve 3 rows with a divider beneath; agent must sit 4 rows below the prompt row:\n{text}"
         );
     }
 
@@ -806,7 +806,9 @@ mod tests {
     fn unfocused_branch_mode_value_stays_readable() {
         let app = branch_source_app();
         let buffer = render_app_buffer(&app);
-        let (x, y) = find_text_pos(&buffer, "New").expect("missing branch mode value");
+        // Branch mode is rendered as lowercase tab segments (`new  existing`).
+        // Selected segment uses TEXT regardless of row focus.
+        let (x, y) = find_text_pos(&buffer, "new").expect("missing branch mode value");
 
         assert_eq!(buffer[(x, y)].fg, TEXT);
     }
