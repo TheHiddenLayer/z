@@ -10,10 +10,7 @@ use ratatui::{
     layout::{Constraint, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        StatefulWidget, Table, TableState, Widget,
-    },
+    widgets::{Block, Borders, Cell, Paragraph, Row, StatefulWidget, Table, TableState, Widget},
 };
 
 use crate::agent::{Agent, AgentStatus};
@@ -88,15 +85,6 @@ impl Widget for &AgentTableWidget<'_> {
         let visible_rows = (area.height as usize).saturating_sub(2);
         let selected = self.selected.min(self.agents.len().saturating_sub(1));
         let offset = table_scroll_offset(selected, visible_rows);
-        let needs_scrollbar = self.agents.len() > visible_rows;
-        let table_area = if needs_scrollbar && area.width > 1 {
-            Rect {
-                width: area.width.saturating_sub(1),
-                ..area
-            }
-        } else {
-            area
-        };
 
         let repo_w = self
             .agents
@@ -211,19 +199,7 @@ impl Widget for &AgentTableWidget<'_> {
         let mut table_state = TableState::default()
             .with_selected(Some(selected))
             .with_offset(offset);
-        StatefulWidget::render(table, table_area, buf, &mut table_state);
-
-        if needs_scrollbar && area.width > 1 {
-            let mut scrollbar_state = ScrollbarState::new(self.agents.len())
-                .viewport_content_length(visible_rows)
-                .position(table_state.offset());
-            StatefulWidget::render(
-                Scrollbar::new(ScrollbarOrientation::VerticalRight).style(Style::default().fg(DIM)),
-                area,
-                buf,
-                &mut scrollbar_state,
-            );
-        }
+        StatefulWidget::render(table, area, buf, &mut table_state);
     }
 }
 
@@ -356,6 +332,32 @@ mod tests {
         assert!(
             !dump.contains("branch-1"),
             "first branch should scroll out:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn overflowing_table_does_not_render_scrollbar() {
+        let mut agents = Vec::new();
+        for n in 1..=8 {
+            let mut agent = make_agent_with_status(AgentStatus::Running);
+            agent.repo_name = "myrepo".into();
+            agent.branch = format!("branch-{n}");
+            agent.slug = format!("branch-{n}");
+            agents.push(agent);
+        }
+
+        let widget = AgentTableWidget::new(&agents).selected(7);
+        let terminal = render_widget(&widget, 80, 6);
+        let buf = terminal.backend().buffer();
+        let right_edge_x = buf.area.width.saturating_sub(1);
+        let right_edge: Vec<&str> = (0..buf.area.height)
+            .map(|y| buf[(right_edge_x, y)].symbol())
+            .collect();
+
+        assert!(
+            right_edge.iter().all(|symbol| *symbol == " "),
+            "overflowing bottom agent table should not render a scrollbar on the right edge:\n{}",
+            buffer_to_string(&terminal)
         );
     }
 }
