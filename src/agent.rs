@@ -123,16 +123,13 @@ impl Agent {
     pub fn shows_spinner(&self) -> bool {
         match self.status {
             AgentStatus::Creating => true,
-            AgentStatus::Running => {
-                match (self.seen_activity_since_seed, self.last_pane_hash) {
-                    (true, Some(_)) => self.quiet_captures < QUIET_THRESHOLD,
-                    (false, Some(_)) => {
-                        self.was_spinner_visible
-                            && self.quiet_captures < QUIET_THRESHOLD
-                    }
-                    (_, None) => self.was_spinner_visible,
+            AgentStatus::Running => match (self.seen_activity_since_seed, self.last_pane_hash) {
+                (true, Some(_)) => self.quiet_captures < QUIET_THRESHOLD,
+                (false, Some(_)) => {
+                    self.was_spinner_visible && self.quiet_captures < QUIET_THRESHOLD
                 }
-            }
+                (_, None) => self.was_spinner_visible,
+            },
             AgentStatus::Stopped | AgentStatus::Error(_) => false,
         }
     }
@@ -243,8 +240,8 @@ pub fn discover_agents(
         .filter(|(wt, _)| !wt.is_main)
         .map(|(wt, agent_name)| {
             let branch = wt.branch.as_deref().unwrap_or("detached");
-            let slug = worktree_slug(repo_path, &wt.path)
-                .unwrap_or_else(|| branch.replace('/', "-"));
+            let slug =
+                worktree_slug(repo_path, &wt.path).unwrap_or_else(|| branch.replace('/', "-"));
             let sess_name = format!("{TMUX_PREFIX}-{repo_name}-{slug}");
             let session = sessions.iter().find(|s| s.name == sess_name);
 
@@ -293,7 +290,9 @@ pub async fn list_worktrees(repo_path: &Path) -> Result<Vec<Worktree>, String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(parse_worktree_list(&String::from_utf8_lossy(&output.stdout)))
+    Ok(parse_worktree_list(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 pub async fn fetch_origin(repo_path: &Path) -> Result<(), String> {
@@ -319,6 +318,7 @@ pub async fn list_branches(repo_path: &Path) -> Result<Vec<String>, String> {
         .arg(repo_path)
         .args([
             "for-each-ref",
+            "--sort=-committerdate",
             "--format=%(refname)",
             "refs/heads/",
             "refs/remotes/origin/",
@@ -332,7 +332,8 @@ pub async fn list_branches(repo_path: &Path) -> Result<Vec<String>, String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut branches = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let name = if let Some(local) = line.strip_prefix("refs/heads/") {
             local.to_string()
@@ -344,9 +345,11 @@ pub async fn list_branches(repo_path: &Path) -> Result<Vec<String>, String> {
         } else {
             continue;
         };
-        seen.insert(name);
+        if seen.insert(name.clone()) {
+            branches.push(name);
+        }
     }
-    Ok(seen.into_iter().collect())
+    Ok(branches)
 }
 
 pub async fn list_sessions() -> Vec<TmuxSession> {
@@ -354,7 +357,12 @@ pub async fn list_sessions() -> Vec<TmuxSession> {
     // capture-pane content-hash polling via shows_spinner()'s observation
     // counters; window_activity's 1s granularity is too coarse.
     let output = Command::new("tmux")
-        .args(["list-windows", "-a", "-F", "#{session_name}\t#{session_path}"])
+        .args([
+            "list-windows",
+            "-a",
+            "-F",
+            "#{session_name}\t#{session_path}",
+        ])
         .output()
         .await;
     match output {
@@ -363,6 +371,34 @@ pub async fn list_sessions() -> Vec<TmuxSession> {
         }
         _ => Vec::new(),
     }
+}
+
+pub fn gitlab_mr_refspec(iid: u64, branch: &str) -> String {
+    format!("merge-requests/{iid}/head:{branch}")
+}
+
+pub async fn prepare_gitlab_mr_branch(
+    repo_path: &Path,
+    iid: u64,
+    branch: &str,
+) -> Result<(), String> {
+    let refspec = gitlab_mr_refspec(iid, branch);
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["fetch", "origin", &refspec])
+        .output()
+        .await
+        .map_err(|e| format!("git failed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "git fetch MR branch failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(())
 }
 
 pub async fn create_worktree(
@@ -383,10 +419,7 @@ pub async fn create_worktree(
         .map_err(|e| format!("git failed: {e}"))?;
     if !check.status.success() {
         let stderr = String::from_utf8_lossy(&check.stderr);
-        return Err(format!(
-            "invalid branch name: {branch} ({})",
-            stderr.trim()
-        ));
+        return Err(format!("invalid branch name: {branch} ({})", stderr.trim()));
     }
 
     // Refuse to create a branch that already exists
@@ -432,7 +465,11 @@ pub async fn create_worktree(
             let has_remote = Command::new("git")
                 .arg("-C")
                 .arg(repo_path)
-                .args(["rev-parse", "--verify", &format!("refs/remotes/{remote_ref}")])
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/remotes/{remote_ref}"),
+                ])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
@@ -526,12 +563,30 @@ pub async fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> Result<(
     Ok(())
 }
 
-pub async fn create_session(name: &str, working_dir: &Path, command: Option<&str>) -> Result<(), String> {
+pub async fn create_session(
+    name: &str,
+    working_dir: &Path,
+    command: Option<&str>,
+) -> Result<(), String> {
     let dir_str = working_dir.to_str().ok_or("non-utf8 path")?;
     let mut cmd = Command::new("tmux");
-    cmd.args(["set-option", "-g", "history-limit", "50000", ";",
-              "new-session", "-d", "-s", name, "-c", dir_str]);
-    let output = cmd.output().await.map_err(|e| format!("tmux failed: {e}"))?;
+    cmd.args([
+        "set-option",
+        "-g",
+        "history-limit",
+        "50000",
+        ";",
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-c",
+        dir_str,
+    ]);
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("tmux failed: {e}"))?;
     if !output.status.success() {
         return Err(format!(
             "tmux new-session failed: {}",
@@ -540,25 +595,51 @@ pub async fn create_session(name: &str, working_dir: &Path, command: Option<&str
     }
 
     // Keep the tmux session alive after the agent process exits.
-    if let Some(shell_command) = command {
-        if let Err(e) = send_shell_command(name, shell_command).await {
-            let _ = kill_session(name).await;
-            return Err(e);
-        }
+    if let Some(shell_command) = command
+        && let Err(e) = send_shell_command(name, shell_command).await
+    {
+        let _ = kill_session(name).await;
+        return Err(e);
     }
 
     Ok(())
 }
 
 async fn send_shell_command(session: &str, shell_command: &str) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt as _;
+
+    // send-keys -l corrupts long multi-line input: bash readline redraws each
+    // PS2 line per char and the pty buffer races. Stage via a tmux paste
+    // buffer instead so readline absorbs the chunk atomically.
+    let buffer = format!("z-{session}");
+
+    let mut child = Command::new("tmux")
+        .args(["load-buffer", "-b", &buffer, "-"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("tmux failed: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(shell_command.as_bytes())
+            .await
+            .map_err(|e| format!("tmux load-buffer write failed: {e}"))?;
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("tmux failed: {e}"))?;
+    if !status.success() {
+        return Err("tmux load-buffer failed".to_string());
+    }
+
     let output = Command::new("tmux")
-        .args(["send-keys", "-t", session, "-l", shell_command])
+        .args(["paste-buffer", "-d", "-b", &buffer, "-t", session, "-p"])
         .output()
         .await
         .map_err(|e| format!("tmux failed: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "tmux send-keys failed: {}",
+            "tmux paste-buffer failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
@@ -598,7 +679,13 @@ pub async fn kill_session(name: &str) -> Result<(), String> {
 /// "active" signal that pane reflow produces.
 pub async fn session_attached_count(session: &str) -> Option<u32> {
     let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", session, "#{session_attached}"])
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{session_attached}",
+        ])
         .output()
         .await
         .ok()?;
@@ -633,7 +720,9 @@ pub async fn capture_pane(session: &str) -> Option<String> {
 /// start flowing. Once set, subsequent z runs in the same server work
 /// immediately.
 pub fn enable_tmux_focus_events() {
-    if std::env::var_os("TMUX").is_none() { return; }
+    if std::env::var_os("TMUX").is_none() {
+        return;
+    }
     let _ = std::process::Command::new("tmux")
         .args(["set-option", "-g", "focus-events", "on"])
         .stdout(std::process::Stdio::null())
@@ -675,7 +764,9 @@ async fn read_z_meta(worktree_path: &Path) -> Option<(String, Option<String>)> {
     let mut agent_name: Option<String> = None;
     let mut base: Option<String> = None;
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Some((key, val)) = line.split_once(' ') else { continue };
+        let Some((key, val)) = line.split_once(' ') else {
+            continue;
+        };
         let val = val.trim();
         match key {
             "z.agent" => agent_name = Some(val.to_string()),
@@ -693,10 +784,8 @@ pub async fn discover_all(repos: &[PathBuf]) -> Vec<Agent> {
         .iter()
         .map(|repo| async move { (repo.clone(), list_worktrees(repo).await) })
         .collect();
-    let (sessions, worktree_results) = tokio::join!(
-        sessions_fut,
-        futures::future::join_all(worktree_futs)
-    );
+    let (sessions, worktree_results) =
+        tokio::join!(sessions_fut, futures::future::join_all(worktree_futs));
 
     let mut all_agents = Vec::new();
     for (repo_path, result) in worktree_results {
@@ -706,9 +795,8 @@ pub async fn discover_all(repos: &[PathBuf]) -> Vec<Agent> {
         // returns both `z.agent` (z-managed marker) and `z.base` together,
         // halving subprocess cost vs. the previous two-pass design.
         let non_main: Vec<Worktree> = worktrees.into_iter().filter(|wt| !wt.is_main).collect();
-        let metas = futures::future::join_all(
-            non_main.iter().map(|wt| read_z_meta(&wt.path))
-        ).await;
+        let metas =
+            futures::future::join_all(non_main.iter().map(|wt| read_z_meta(&wt.path))).await;
         let triples: Vec<(Worktree, String, Option<String>)> = non_main
             .into_iter()
             .zip(metas)
@@ -722,6 +810,17 @@ pub async fn discover_all(repos: &[PathBuf]) -> Vec<Agent> {
         for (agent, (_, _, base)) in agents.iter_mut().zip(triples) {
             agent.base_branch = base;
         }
+        // Order agents by worktree mtime descending. Git's `worktree list`
+        // returns entries in `.git/worktrees/` readdir order which is
+        // alphabetical on most filesystems; surface recently-touched
+        // worktrees first instead.
+        agents.sort_by_cached_key(|a| {
+            std::cmp::Reverse(
+                std::fs::metadata(&a.worktree_path)
+                    .and_then(|m| m.modified())
+                    .ok(),
+            )
+        });
         all_agents.append(&mut agents);
     }
 
@@ -744,6 +843,192 @@ pub(crate) mod tests {
     fn agent_status_running_has_session() {
         let status = AgentStatus::Running;
         assert!(status.has_session());
+    }
+
+    #[test]
+    fn gitlab_mr_refspec_fetches_head_into_source_branch() {
+        assert_eq!(
+            gitlab_mr_refspec(184, "fix/remote-shell-profiles"),
+            "merge-requests/184/head:fix/remote-shell-profiles"
+        );
+    }
+
+    #[test]
+    fn gitlab_mr_refspec_preserves_slashes() {
+        assert_eq!(
+            gitlab_mr_refspec(7, "jona/gen-1102-detect-agents"),
+            "merge-requests/7/head:jona/gen-1102-detect-agents"
+        );
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("z-agent-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} in {cwd:?} failed to start: {e}"))
+    }
+
+    fn assert_git(cwd: &Path, args: &[&str]) {
+        let output = run_git(cwd, args);
+        assert!(
+            output.status.success(),
+            "git {args:?} in {cwd:?} failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+        let output = run_git(cwd, args);
+        assert!(
+            output.status.success(),
+            "git {args:?} in {cwd:?} failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn write_commit(repo: &Path, contents: &str, message: &str) -> String {
+        std::fs::write(repo.join("file.txt"), contents).unwrap();
+        assert_git(repo, &["add", "file.txt"]);
+        assert_git(repo, &["commit", "-q", "-m", message]);
+        git_stdout(repo, &["rev-parse", "HEAD"])
+    }
+
+    fn setup_gitlab_mr_repo(
+        name: &str,
+        iid: u64,
+        branch: &str,
+    ) -> (PathBuf, PathBuf, String, String) {
+        let tmp = unique_temp_dir(name);
+        let origin = tmp.join("origin.git");
+        let seed = tmp.join("seed");
+        let repo = tmp.join("repo");
+
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&seed).unwrap();
+
+        assert_git(&origin, &["init", "-q", "--bare"]);
+        assert_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+        assert_git(&seed, &["init", "-q", "-b", "main"]);
+        assert_git(&seed, &["config", "user.email", "redacted"]);
+        assert_git(&seed, &["config", "user.name", "Z Test"]);
+        write_commit(&seed, "base\n", "base");
+        assert_git(
+            &seed,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        assert_git(&seed, &["push", "-q", "origin", "main"]);
+
+        assert_git(&seed, &["checkout", "-q", "-b", branch]);
+        let stale_sha = write_commit(&seed, "stale\n", "stale");
+        assert_git(&seed, &["push", "-q", "origin", branch]);
+        let mr_sha = write_commit(&seed, "mr head\n", "mr head");
+        let mr_push_ref = format!("HEAD:refs/merge-requests/{iid}/head");
+        assert_git(&seed, &["push", "-q", "origin", &mr_push_ref]);
+
+        let output = std::process::Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git clone failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        (tmp, repo, stale_sha, mr_sha)
+    }
+
+    #[tokio::test]
+    async fn prepare_gitlab_mr_branch_fetches_missing_local_branch() {
+        let (tmp, repo, _, mr_sha) = setup_gitlab_mr_repo("missing-branch", 184, "fix/mr-head");
+
+        prepare_gitlab_mr_branch(&repo, 184, "fix/mr-head")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "refs/heads/fix/mr-head"]),
+            mr_sha
+        );
+        assert_eq!(git_stdout(&repo, &["branch", "--show-current"]), "main");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn prepare_gitlab_mr_branch_updates_stale_existing_local_branch() {
+        let (tmp, repo, stale_sha, mr_sha) =
+            setup_gitlab_mr_repo("stale-branch", 185, "fix/stale-mr");
+        assert_git(&repo, &["branch", "fix/stale-mr", &stale_sha]);
+
+        prepare_gitlab_mr_branch(&repo, 185, "fix/stale-mr")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "refs/heads/fix/stale-mr"]),
+            mr_sha
+        );
+        assert_eq!(git_stdout(&repo, &["branch", "--show-current"]), "main");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn prepare_gitlab_mr_branch_fetches_branch_names_with_slashes() {
+        let (tmp, repo, _, mr_sha) =
+            setup_gitlab_mr_repo("slash-branch", 186, "jona/gen-1102-detect-agents");
+
+        prepare_gitlab_mr_branch(&repo, 186, "jona/gen-1102-detect-agents")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            git_stdout(
+                &repo,
+                &["rev-parse", "refs/heads/jona/gen-1102-detect-agents"]
+            ),
+            mr_sha
+        );
+        assert_eq!(git_stdout(&repo, &["branch", "--show-current"]), "main");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn prepare_gitlab_mr_branch_reports_fetch_failure() {
+        let (tmp, repo, _, _) = setup_gitlab_mr_repo("fetch-failure", 187, "fix/available");
+
+        let error = prepare_gitlab_mr_branch(&repo, 999, "fix/missing")
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.contains("git fetch MR branch failed"),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // --- Worktree parsing (from git.rs) ---
@@ -872,10 +1157,13 @@ detached
         let repo = tmp.join("repo");
         let run = |args: &[&str], cwd: &Path| {
             let status = std::process::Command::new("git")
-                .arg("-C").arg(cwd).args(args)
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .status().unwrap();
+                .status()
+                .unwrap();
             assert!(status.success(), "git {args:?} in {cwd:?}");
         };
 
@@ -886,8 +1174,20 @@ detached
 
         let z_wt = tmp.join("z-wt");
         let ext_wt = tmp.join("ext-wt");
-        run(&["worktree", "add", z_wt.to_str().unwrap(), "-b", "z-branch"], &repo);
-        run(&["worktree", "add", ext_wt.to_str().unwrap(), "-b", "ext-branch"], &repo);
+        run(
+            &["worktree", "add", z_wt.to_str().unwrap(), "-b", "z-branch"],
+            &repo,
+        );
+        run(
+            &[
+                "worktree",
+                "add",
+                ext_wt.to_str().unwrap(),
+                "-b",
+                "ext-branch",
+            ],
+            &repo,
+        );
         run(&["config", "--worktree", "z.agent", "claude"], &z_wt);
         run(&["config", "--worktree", "z.base", "main"], &z_wt);
 
@@ -1011,7 +1311,7 @@ detached
             quiet_captures: 0,
             seen_activity_since_seed: false,
             was_spinner_visible: false,
-                consecutive_emits: 0,
+            consecutive_emits: 0,
         };
         assert_eq!(a.quiet_captures, 0);
         assert!(!a.seen_activity_since_seed);
@@ -1039,7 +1339,7 @@ detached
             quiet_captures: 0,
             seen_activity_since_seed: false,
             was_spinner_visible: false,
-                consecutive_emits: 0,
+            consecutive_emits: 0,
         }
     }
 
@@ -1071,12 +1371,13 @@ detached
         a.quiet_captures = 999; // not consulted in the (_, None) branch
 
         a.was_spinner_visible = true;
-        assert!(a.shows_spinner(),
-            "post-detach active agent must keep its spinner");
+        assert!(
+            a.shows_spinner(),
+            "post-detach active agent must keep its spinner"
+        );
 
         a.was_spinner_visible = false;
-        assert!(!a.shows_spinner(),
-            "post-detach idle agent must stay idle");
+        assert!(!a.shows_spinner(), "post-detach idle agent must stay idle");
     }
 
     #[test]

@@ -1,6 +1,9 @@
-mod config;
 mod agent;
+mod agent_table;
 mod app;
+mod config;
+mod gitlab;
+mod new_agent_panel;
 mod notifications;
 mod style;
 mod ui;
@@ -9,8 +12,8 @@ use std::time::Duration;
 
 use crossterm::{
     event::{DisableFocusChange, EnableFocusChange, EventStream, KeyEventKind},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
 use ratatui::prelude::*;
@@ -127,9 +130,16 @@ async fn destroy_all(
         return Ok(());
     }
 
-    let max_session = agents.iter().map(|a| a.session_name.len()).max().unwrap_or(0);
+    let max_session = agents
+        .iter()
+        .map(|a| a.session_name.len())
+        .max()
+        .unwrap_or(0);
     let n = agents.len();
-    println!("About to destroy {n} agent{}:", if n == 1 { "" } else { "s" });
+    println!(
+        "About to destroy {n} agent{}:",
+        if n == 1 { "" } else { "s" }
+    );
     if preserve_tmux {
         println!("tmux sessions will be preserved.");
     }
@@ -163,10 +173,11 @@ async fn destroy_all(
         std::io::stdout().flush()?;
 
         let mut errors: Vec<String> = Vec::new();
-        if a.status.has_session() && !preserve_tmux {
-            if let Err(e) = agent::kill_session(&a.session_name).await {
-                errors.push(format!("kill_session: {e}"));
-            }
+        if a.status.has_session()
+            && !preserve_tmux
+            && let Err(e) = agent::kill_session(&a.session_name).await
+        {
+            errors.push(format!("kill_session: {e}"));
         }
         if let Err(e) = agent::remove_worktree(&a.repo_path, &a.worktree_path).await {
             errors.push(format!("remove_worktree: {e}"));
@@ -221,6 +232,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for cmd in app.update(Action::RefreshAgents) {
         execute(cmd, &action_tx);
     }
+
+    install_panic_hook();
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -286,15 +299,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Clean shutdown
     events.stop();
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableFocusChange, LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    restore_terminal()?;
 
     Ok(())
 }
 
+/// Restore terminal to a sane state. Safe to call from a panic hook because
+/// it only touches stdout; doesn't depend on the `Terminal` instance.
+fn restore_terminal() -> std::io::Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        std::io::stdout(),
+        DisableFocusChange,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show,
+    )?;
+    Ok(())
+}
+
+/// Restore terminal before delegating to the original panic hook so panic
+/// output isn't swallowed by raw mode / the alternate screen.
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = restore_terminal();
+        original(info);
+    }));
+}
+
 /// Route a command. Attach is the only command that runs synchronously in
-/// the main loop (it has to suspend the TUI and hand the terminal to tmux);
+/// the main loop (it has to suspend the TUI and hand the terminal to tmux).
+/// Prompt editing also runs synchronously because `$EDITOR` owns the terminal;
 /// everything else is fire-and-forget via `execute`.
 async fn dispatch(
     cmd: Command,
@@ -307,9 +342,125 @@ async fn dispatch(
         Command::Attach(agent) => {
             suspend_and_attach(app, &agent, terminal, events, action_tx).await?;
         }
+        Command::EditPrompt { initial_prompt } => {
+            suspend_and_edit_prompt(app, initial_prompt, terminal, events, action_tx).await?;
+        }
         other => execute(other, action_tx),
     }
     Ok(())
+}
+
+fn prompt_editor_temp_path() -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("z-prompt-{}-{nanos}.md", std::process::id()))
+}
+
+fn prompt_editor_from_env() -> Result<String, String> {
+    std::env::var("EDITOR")
+        .map_err(|_| "$EDITOR is not set".to_string())
+        .and_then(|editor| {
+            if editor.trim().is_empty() {
+                Err("$EDITOR is empty".to_string())
+            } else {
+                Ok(editor)
+            }
+        })
+}
+
+fn run_prompt_editor_with(editor: &str, initial_prompt: &str) -> Result<String, String> {
+    if editor.trim().is_empty() {
+        return Err("$EDITOR is empty".to_string());
+    }
+
+    let path = prompt_editor_temp_path();
+    std::fs::write(&path, initial_prompt).map_err(|e| format!("write temp file: {e}"))?;
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("$EDITOR \"$1\"")
+        .arg("z-prompt-editor")
+        .arg(&path)
+        .env("EDITOR", editor)
+        .status()
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&path);
+            format!("launch editor: {e}")
+        })?;
+
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("editor exited with {status}"));
+    }
+
+    let edited = std::fs::read_to_string(&path).map_err(|e| {
+        let _ = std::fs::remove_file(&path);
+        format!("read temp file: {e}")
+    })?;
+    let _ = std::fs::remove_file(path);
+    Ok(edited)
+}
+
+fn stderr_tail(bytes: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(bytes);
+    stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("command failed")
+        .to_string()
+}
+
+fn glab_error_message(stderr: &[u8]) -> String {
+    let raw = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    let host_classification_failure = [
+        "no known gitlab host",
+        "known gitlab host",
+        "none of the git remotes",
+        "configured remotes",
+        "no gitlab remotes",
+    ]
+    .iter()
+    .any(|needle| raw.contains(needle));
+
+    if host_classification_failure {
+        return stderr_tail(stderr);
+    }
+
+    if raw.contains("auth login")
+        || raw.contains("not logged in")
+        || raw.contains("not authenticated")
+        || raw.contains("authentication")
+        || raw.contains("unauthorized")
+    {
+        return "glab auth required".into();
+    }
+
+    stderr_tail(stderr)
+}
+
+async fn run_glab(repo_path: &std::path::Path, args: Vec<String>) -> Result<String, String> {
+    let output = tokio::process::Command::new("glab")
+        .current_dir(repo_path)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "glab not found".into()
+            } else {
+                format!("glab failed: {e}")
+            }
+        })?;
+
+    if !output.status.success() {
+        return Err(glab_error_message(&output.stderr));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
@@ -328,7 +479,7 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                 // Swallow errors — offline/VPN-down shouldn't block the wizard.
                 let _ = agent::fetch_origin(&repo).await;
                 let branches = agent::list_branches(&repo).await.unwrap_or_default();
-                let _ = tx.send(Action::BranchesLoaded { branches });
+                let _ = tx.send(Action::BranchesLoaded { repo, branches });
             });
         }
         Command::CaptureActivity { session_name } => {
@@ -364,10 +515,25 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
         } => {
             let tx = tx.clone();
             tokio::spawn(async move {
-                match agent::create_worktree(&repo, &branch, new_branch, base_branch.as_deref(), &agent_name).await {
+                match agent::create_worktree(
+                    &repo,
+                    &branch,
+                    new_branch,
+                    base_branch.as_deref(),
+                    &agent_name,
+                )
+                .await
+                {
                     Ok(worktree_path) => {
-                        if let Err(e) = agent::create_session(&session_name, &worktree_path, Some(&fresh_cmd)).await {
-                            let _ = tx.send(Action::AgentFailed { session: session_name, error: e });
+                        if let Err(e) =
+                            agent::create_session(&session_name, &worktree_path, Some(&fresh_cmd))
+                                .await
+                        {
+                            let _ = tx.send(Action::AgentSessionFailed {
+                                session: session_name,
+                                error: e,
+                                worktree_path,
+                            });
                             return;
                         }
                         let _ = tx.send(Action::AgentReady {
@@ -377,7 +543,56 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                         });
                     }
                     Err(e) => {
-                        let _ = tx.send(Action::AgentFailed { session: session_name, error: e });
+                        let _ = tx.send(Action::AgentSetupFailed {
+                            session: session_name,
+                            error: e,
+                        });
+                    }
+                }
+            });
+        }
+        Command::PrepareGitlabMrBranch {
+            repo,
+            mr_iid,
+            branch,
+            session_name,
+            agent_name,
+            fresh_cmd,
+        } => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = agent::prepare_gitlab_mr_branch(&repo, mr_iid, &branch).await {
+                    let _ = tx.send(Action::AgentSetupFailed {
+                        session: session_name,
+                        error: e,
+                    });
+                    return;
+                }
+
+                match agent::create_worktree(&repo, &branch, false, None, &agent_name).await {
+                    Ok(worktree_path) => {
+                        if let Err(e) =
+                            agent::create_session(&session_name, &worktree_path, Some(&fresh_cmd))
+                                .await
+                        {
+                            let _ = tx.send(Action::AgentSessionFailed {
+                                session: session_name,
+                                error: e,
+                                worktree_path,
+                            });
+                            return;
+                        }
+                        let _ = tx.send(Action::AgentReady {
+                            branch,
+                            session: session_name,
+                            worktree_path,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Action::AgentSetupFailed {
+                            session: session_name,
+                            error: e,
+                        });
                     }
                 }
             });
@@ -409,7 +624,10 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                     errors.push(format!("branch: {e}"));
                 }
                 if !errors.is_empty() {
-                    let _ = tx.send(Action::DeleteFailed { branch: branch.clone(), error: errors.join("; ") });
+                    let _ = tx.send(Action::DeleteFailed {
+                        branch: branch.clone(),
+                        error: errors.join("; "),
+                    });
                 }
                 let _ = tx.send(Action::RefreshAgents);
             });
@@ -417,24 +635,201 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
         Command::PrepareAttach { agent, resume_cmd } => {
             let tx = tx.clone();
             tokio::spawn(async move {
-                if !agent.status.has_session() {
-                    if let Err(e) = agent::create_session(
+                if !agent.status.has_session()
+                    && let Err(e) = agent::create_session(
                         &agent.session_name,
                         &agent.worktree_path,
                         Some(&resume_cmd),
-                    ).await {
-                        let _ = tx.send(Action::AgentFailed {
-                            session: agent.session_name.clone(),
-                            error: e,
-                        });
-                        return;
-                    }
+                    )
+                    .await
+                {
+                    let _ = tx.send(Action::AgentFailed {
+                        session: agent.session_name.clone(),
+                        error: e,
+                    });
+                    return;
                 }
                 let _ = tx.send(Action::AttachReady(agent));
             });
         }
+        Command::RefreshMr { key, source_branch } => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let snapshot = match run_glab(
+                    &key.repo_path,
+                    crate::gitlab::list_args(&source_branch),
+                )
+                .await
+                {
+                    Ok(stdout) => match crate::gitlab::parse_mr_list(&stdout) {
+                        Ok(Some(mr)) => crate::app::MrSnapshot::Ready(mr),
+                        Ok(None) => crate::app::MrSnapshot::Missing,
+                        Err(e) => crate::app::MrSnapshot::Error(e),
+                    },
+                    Err(e) => crate::app::MrSnapshot::Error(e),
+                };
+                let _ = tx.send(Action::MrRefreshed { key, snapshot });
+            });
+        }
+        Command::CreateMr {
+            key,
+            source_branch,
+            target_branch,
+            worktree_path,
+        } => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let snapshot = match run_glab(
+                    &worktree_path,
+                    crate::gitlab::create_args(&source_branch, &target_branch),
+                )
+                .await
+                {
+                    Ok(_) => {
+                        match run_glab(&key.repo_path, crate::gitlab::list_args(&source_branch))
+                            .await
+                        {
+                            Ok(stdout) => match crate::gitlab::parse_mr_list(&stdout) {
+                                Ok(Some(mr)) => crate::app::MrSnapshot::Ready(mr),
+                                Ok(None) => crate::app::MrSnapshot::Missing,
+                                Err(e) => crate::app::MrSnapshot::Error(e),
+                            },
+                            Err(e) => crate::app::MrSnapshot::Error(e),
+                        }
+                    }
+                    Err(e) => crate::app::MrSnapshot::Error(format!("MR create: {e}")),
+                };
+                let _ = tx.send(Action::MrRefreshed { key, snapshot });
+            });
+        }
+        Command::OpenMr { key, id_or_branch } => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    run_glab(&key.repo_path, crate::gitlab::open_args(&id_or_branch)).await
+                {
+                    let _ = tx.send(Action::MrOpenFailed {
+                        key,
+                        error: format!("MR open: {e}"),
+                    });
+                }
+            });
+        }
+        Command::MergeMr { key, id_or_branch } => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let snapshot = match run_glab(
+                    &key.repo_path,
+                    crate::gitlab::merge_args(&id_or_branch),
+                )
+                .await
+                {
+                    Ok(_) => {
+                        match run_glab(&key.repo_path, crate::gitlab::view_args(&id_or_branch))
+                            .await
+                        {
+                            Ok(stdout) => match crate::gitlab::parse_mr_view(&stdout) {
+                                Ok(mr) => crate::app::MrSnapshot::Ready(mr),
+                                Err(e) => crate::app::MrSnapshot::Error(e),
+                            },
+                            Err(e) => crate::app::MrSnapshot::Error(e),
+                        }
+                    }
+                    Err(e) => crate::app::MrSnapshot::Error(format!("MR merge: {e}")),
+                };
+                let _ = tx.send(Action::MrRefreshed { key, snapshot });
+            });
+        }
+        Command::StartAgentIntent { agent, fresh_cmd } => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                match agent::create_session(
+                    &agent.session_name,
+                    &agent.worktree_path,
+                    Some(&fresh_cmd),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        let _ = tx.send(Action::RefreshAgents);
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Action::AgentFailed {
+                            session: agent.session_name,
+                            error: e,
+                        });
+                    }
+                }
+            });
+        }
+        Command::LoadGitlabIssues(repo) => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let result = crate::gitlab::list_assigned_issues(&repo)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(Action::GitlabIssuesLoaded { repo, result });
+            });
+        }
+        Command::LoadGitlabMrs(repo) => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let result = crate::gitlab::list_review_merge_requests(&repo)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(Action::GitlabMrsLoaded { repo, result });
+            });
+        }
         Command::Attach(_) => unreachable!("Attach handled by dispatch"),
+        Command::EditPrompt { .. } => unreachable!("EditPrompt handled by dispatch"),
     }
+}
+
+async fn suspend_and_edit_prompt(
+    app: &mut App,
+    initial_prompt: String,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    events: &mut EventHandle,
+    action_tx: &mpsc::UnboundedSender<Action>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let editor = match prompt_editor_from_env() {
+        Ok(editor) => editor,
+        Err(error) => {
+            for cmd in app.update(Action::PromptEdited(Err(error))) {
+                execute(cmd, action_tx);
+            }
+            return Ok(());
+        }
+    };
+
+    events.stop();
+
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        DisableFocusChange,
+        LeaveAlternateScreen
+    )?;
+    terminal.show_cursor()?;
+
+    let result = run_prompt_editor_with(&editor, &initial_prompt);
+
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableFocusChange
+    )?;
+    terminal.hide_cursor()?;
+    terminal.clear()?;
+
+    events.restart();
+
+    for cmd in app.update(Action::PromptEdited(result)) {
+        execute(cmd, action_tx);
+    }
+
+    Ok(())
 }
 
 async fn suspend_and_attach(
@@ -449,7 +844,11 @@ async fn suspend_and_attach(
     events.stop();
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableFocusChange, LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableFocusChange,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     let _ = agent::attach(&agent_to_attach.session_name);
@@ -462,7 +861,11 @@ async fn suspend_and_attach(
     )?;
 
     enable_raw_mode()?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableFocusChange)?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableFocusChange
+    )?;
     terminal.hide_cursor()?;
     terminal.clear()?;
 
@@ -491,6 +894,89 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn prompt_editor_runs_editor_and_reads_file() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let script_path = std::env::temp_dir().join(format!(
+            "z-editor-test-{}-{}.sh",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut script = std::fs::File::create(&script_path).unwrap();
+        writeln!(script, "#!/bin/sh").unwrap();
+        writeln!(script, "printf 'edited prompt' > \"$1\"").unwrap();
+        drop(script);
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let edited = run_prompt_editor_with(script_path.to_str().unwrap(), "initial").unwrap();
+
+        assert_eq!(edited, "edited prompt");
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    fn missing_repo(suffix: &str) -> std::path::PathBuf {
+        let repo = std::env::temp_dir().join(format!(
+            "z-wizard-missing-repo-{suffix}-{}",
+            std::process::id()
+        ));
+        assert!(!repo.exists());
+        repo
+    }
+
+    #[tokio::test]
+    async fn execute_load_gitlab_issues_sends_repo_aware_result_on_error() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let repo = missing_repo("issues");
+
+        execute(Command::LoadGitlabIssues(repo.clone()), &tx);
+
+        let action = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("load issues action")
+            .expect("action");
+        match action {
+            Action::GitlabIssuesLoaded {
+                repo: action_repo,
+                result,
+            } => {
+                assert_eq!(action_repo, repo);
+                assert!(result.is_err());
+            }
+            other => panic!("expected GitlabIssuesLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_load_gitlab_mrs_sends_repo_aware_result_on_error() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let repo = missing_repo("mrs");
+
+        execute(Command::LoadGitlabMrs(repo.clone()), &tx);
+
+        let action = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("load MRs action")
+            .expect("action");
+        match action {
+            Action::GitlabMrsLoaded {
+                repo: action_repo,
+                result,
+            } => {
+                assert_eq!(action_repo, repo);
+                assert!(result.is_err());
+            }
+            other => panic!("expected GitlabMrsLoaded, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_no_args_is_tui() {
         assert!(matches!(parse_args(&args(&[])), Ok(Cli::Tui)));
@@ -499,7 +985,10 @@ mod tests {
     #[test]
     fn parse_version_flags() {
         assert!(matches!(parse_args(&args(&["-v"])), Ok(Cli::Version)));
-        assert!(matches!(parse_args(&args(&["--version"])), Ok(Cli::Version)));
+        assert!(matches!(
+            parse_args(&args(&["--version"])),
+            Ok(Cli::Version)
+        ));
     }
 
     #[test]
@@ -511,7 +1000,10 @@ mod tests {
     fn parse_destroy_without_yes() {
         assert!(matches!(
             parse_args(&args(&["destroy"])),
-            Ok(Cli::Destroy { yes: false, preserve_tmux: false })
+            Ok(Cli::Destroy {
+                yes: false,
+                preserve_tmux: false
+            })
         ));
     }
 
@@ -519,11 +1011,17 @@ mod tests {
     fn parse_destroy_with_yes() {
         assert!(matches!(
             parse_args(&args(&["destroy", "-y"])),
-            Ok(Cli::Destroy { yes: true, preserve_tmux: false })
+            Ok(Cli::Destroy {
+                yes: true,
+                preserve_tmux: false
+            })
         ));
         assert!(matches!(
             parse_args(&args(&["destroy", "--yes"])),
-            Ok(Cli::Destroy { yes: true, preserve_tmux: false })
+            Ok(Cli::Destroy {
+                yes: true,
+                preserve_tmux: false
+            })
         ));
     }
 
@@ -531,11 +1029,17 @@ mod tests {
     fn parse_destroy_with_preserve_tmux() {
         assert!(matches!(
             parse_args(&args(&["destroy", "--preserve-tmux"])),
-            Ok(Cli::Destroy { yes: false, preserve_tmux: true })
+            Ok(Cli::Destroy {
+                yes: false,
+                preserve_tmux: true
+            })
         ));
         assert!(matches!(
             parse_args(&args(&["destroy", "--leave-tmux", "--yes"])),
-            Ok(Cli::Destroy { yes: true, preserve_tmux: true })
+            Ok(Cli::Destroy {
+                yes: true,
+                preserve_tmux: true
+            })
         ));
     }
 
@@ -547,5 +1051,38 @@ mod tests {
     #[test]
     fn parse_unknown_command() {
         assert!(parse_args(&args(&["whoops"])).is_err());
+    }
+
+    #[test]
+    fn stderr_tail_returns_last_non_empty_line() {
+        let stderr = b"\nfirst line\n\n  final failure  \n\n";
+        assert_eq!(stderr_tail(stderr), "final failure");
+    }
+
+    #[test]
+    fn stderr_tail_falls_back_to_command_failed_for_empty_stderr() {
+        assert_eq!(stderr_tail(b"   "), "command failed");
+        assert_eq!(stderr_tail(b"single line"), "single line");
+    }
+
+    #[test]
+    fn glab_error_maps_auth_failures_to_terse_message() {
+        let stderr = b"something failed\nPlease login to GitLab by running glab auth login\n";
+        assert_eq!(glab_error_message(stderr), "glab auth required");
+    }
+
+    #[test]
+    fn glab_error_preserves_host_classification_failures() {
+        let stderr = b"none of the git remotes are configured remotes for a known GitLab host\nrun glab auth login\n";
+        assert_eq!(glab_error_message(stderr), "run glab auth login");
+    }
+
+    #[test]
+    fn glab_error_uses_stderr_tail_for_other_failures() {
+        let stderr = b"warning\nfatal: merge request is not mergeable\n";
+        assert_eq!(
+            glab_error_message(stderr),
+            "fatal: merge request is not mergeable"
+        );
     }
 }
