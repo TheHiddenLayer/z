@@ -1,7 +1,11 @@
 use crate::agent::{self, Agent, AgentStatus};
 use crate::config::Config;
 use crate::gitlab::{GitlabIssue, GitlabMergeRequest, MergeRequest, MrDisplayKind, classify};
-use crate::source_picker::{filtered_issue_indices, filtered_mr_indices};
+use crate::picker::{filtered_issue_indices, filtered_mr_indices};
+pub use crate::wizard::{
+    BranchMode, Direction, Focus as NewAgentFocus, NewAgent, Remote as RemoteList,
+    Source as NewAgentSource, generate_branch_name,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -108,6 +112,9 @@ pub enum Action {
         content_hash: u64,
         attached_count: u32,
     },
+    ActivityCaptureFailed {
+        session_name: String,
+    },
     BranchesLoaded {
         repo: PathBuf,
         branches: Vec<String>,
@@ -141,40 +148,6 @@ pub enum Action {
     Quit,
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum BranchMode {
-    New,
-    Existing,
-}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum NewAgentSource {
-    Issue,
-    Mr,
-    Branch,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum RemoteList<T> {
-    Idle,
-    Loading,
-    Loaded(Vec<T>),
-    Failed(String),
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum NewAgentFocus {
-    Source,
-    Agent,
-    Repo,
-    Search,
-    SourceList,
-    BranchToggle,
-    BranchList,
-    Name,
-    Prompt,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MrKey {
     pub repo_path: PathBuf,
@@ -205,69 +178,6 @@ pub enum MrIntent {
     Rebase,
     MakeReady,
     ReviewFix,
-}
-
-fn generate_branch_name(branches: &[String], date_str: &str) -> String {
-    let prefix = format!("z-{date_str}-");
-    let max_n = branches
-        .iter()
-        .filter_map(|b| b.strip_prefix(&prefix))
-        .filter_map(|suffix| suffix.parse::<u32>().ok())
-        .max()
-        .unwrap_or(0);
-    format!("{prefix}{}", max_n + 1)
-}
-
-fn select_issue_by_index(
-    issues: &[GitlabIssue],
-    index: usize,
-    source_index: &mut usize,
-    selected_issue: &mut Option<GitlabIssue>,
-    prompt: &mut String,
-    branches: &[String],
-    branch_name: &mut String,
-    name_pristine: &mut bool,
-) -> Option<GitlabIssue> {
-    let issue = issues.get(index)?.clone();
-    *source_index = index;
-    *selected_issue = Some(issue.clone());
-    *prompt = crate::gitlab::issue_prompt(&issue);
-    let today = chrono_free_date_str();
-    *branch_name = crate::gitlab::issue_branch_name(&issue, &today, branches);
-    *name_pristine = true;
-    Some(issue)
-}
-
-fn select_mr_by_index(
-    mrs: &[GitlabMergeRequest],
-    index: usize,
-    source_index: &mut usize,
-    selected_mr: &mut Option<GitlabMergeRequest>,
-    prompt: &mut String,
-) -> Option<GitlabMergeRequest> {
-    let mr = mrs.get(index)?.clone();
-    *source_index = index;
-    *selected_mr = Some(mr.clone());
-    *prompt = crate::gitlab::mr_prompt(&mr);
-    Some(mr)
-}
-
-fn prompt_for_source(
-    source: NewAgentSource,
-    selected_issue: &Option<GitlabIssue>,
-    selected_mr: &Option<GitlabMergeRequest>,
-) -> String {
-    match source {
-        NewAgentSource::Issue => selected_issue
-            .as_ref()
-            .map(crate::gitlab::issue_prompt)
-            .unwrap_or_default(),
-        NewAgentSource::Mr => selected_mr
-            .as_ref()
-            .map(crate::gitlab::mr_prompt)
-            .unwrap_or_default(),
-        NewAgentSource::Branch => String::new(),
-    }
 }
 
 fn issue_selection_is_visible(
@@ -385,25 +295,7 @@ pub enum Command {
 #[derive(Debug, PartialEq)]
 pub enum Mode {
     Normal,
-    NewAgent {
-        repo_index: usize,
-        source: NewAgentSource,
-        source_query: String,
-        source_index: usize,
-        issues: RemoteList<GitlabIssue>,
-        mrs: RemoteList<GitlabMergeRequest>,
-        selected_issue: Option<GitlabIssue>,
-        selected_mr: Option<GitlabMergeRequest>,
-        branch_mode: BranchMode,
-        prompt: String,
-        focus: NewAgentFocus,
-        base_index: usize,
-        branches: Vec<String>,
-        existing_branches: Vec<String>,
-        branch_name: String,
-        name_pristine: bool,
-        agent_name: String,
-    },
+    NewAgent(Box<NewAgent>),
     ConfirmDelete,
     ConfirmMerge {
         key: MrKey,
@@ -441,6 +333,7 @@ pub struct App {
     discover_pending: bool,
     mr_refresh_pending: bool,
     mr_refresh_outstanding: usize,
+    capture_pending: HashSet<String>,
     pending_lifecycle_worktrees: HashSet<PathBuf>,
 
     // Notification gating
@@ -465,6 +358,7 @@ impl App {
             discover_pending: false,
             mr_refresh_pending: false,
             mr_refresh_outstanding: 0,
+            capture_pending: HashSet::new(),
             pending_lifecycle_worktrees: HashSet::new(),
             focused: true,
         }
@@ -506,26 +400,23 @@ impl App {
     /// pane immediately after navigation. The same Command type that the Tick
     /// loop fires periodically — its content lands in `preview_content` when
     /// the session matches the current selection.
-    fn capture_selected_command(&self) -> Option<Command> {
-        let agent = self.selected_agent()?;
-        if agent.status.has_session() {
+    fn schedule_capture(&mut self, session_name: &str) -> Option<Command> {
+        if self.capture_pending.insert(session_name.to_string()) {
             Some(Command::CaptureActivity {
-                session_name: agent.session_name.clone(),
+                session_name: session_name.to_string(),
             })
         } else {
             None
         }
     }
 
-    fn reload_branches_command(&self) -> Option<Command> {
-        if let Mode::NewAgent { repo_index, .. } = &self.mode {
-            let repos = self.config.resolved_repos();
-            repos
-                .get(*repo_index)
-                .map(|repo| Command::LoadBranches(repo.clone()))
-        } else {
-            None
+    fn capture_selected_command(&mut self) -> Option<Command> {
+        let agent = self.selected_agent()?;
+        if !agent.status.has_session() {
+            return None;
         }
+        let session_name = agent.session_name.clone();
+        self.schedule_capture(&session_name)
     }
 
     pub fn selected_mr_key(&self) -> Option<MrKey> {
@@ -678,7 +569,10 @@ impl App {
         // actually changed. All other non-Tick actions change visible state
         // and need a redraw.
         match &action {
-            Action::Tick | Action::ActivityCaptured { .. } | Action::TerminalFocus(_) => {}
+            Action::Tick
+            | Action::ActivityCaptured { .. }
+            | Action::ActivityCaptureFailed { .. }
+            | Action::TerminalFocus(_) => {}
             _ => {
                 self.dirty = true;
             }
@@ -716,25 +610,10 @@ impl App {
                 cmds.push(Command::LoadBranches(repos[0].clone()));
                 cmds.push(Command::LoadGitlabIssues(repos[0].clone()));
                 let today = chrono_free_date_str();
-                self.mode = Mode::NewAgent {
-                    repo_index: 0,
-                    source: NewAgentSource::Issue,
-                    source_query: String::new(),
-                    source_index: 0,
-                    issues: RemoteList::Loading,
-                    mrs: RemoteList::Idle,
-                    selected_issue: None,
-                    selected_mr: None,
-                    branch_mode: BranchMode::New,
-                    prompt: String::new(),
-                    focus: NewAgentFocus::Repo,
-                    base_index: 0,
-                    branches: Vec::new(),
-                    existing_branches: Vec::new(),
-                    branch_name: format!("z-{today}-1"),
-                    name_pristine: true,
-                    agent_name: self.config.default_agent_name().to_string(),
-                };
+                self.mode = Mode::NewAgent(Box::new(NewAgent::new(
+                    &today,
+                    self.config.default_agent_name().to_string(),
+                )));
             }
             Action::StartDelete => {
                 if self.selected_agent().is_some() {
@@ -750,333 +629,55 @@ impl App {
 
             // --- Pickers ---
             Action::PickerNext => {
-                let mut reload_branches = false;
-                let mut load_gitlab_issues = None;
-                let mut load_gitlab_mrs = None;
                 let repos = self.config.resolved_repos();
                 let repo_count = repos.len();
-                let next_agent_name: Option<String> = if let Mode::NewAgent {
-                    focus: NewAgentFocus::Agent,
-                    agent_name,
-                    ..
-                } = &self.mode
-                {
-                    Some(self.config.cycle_next(agent_name).to_string())
-                } else {
-                    None
-                };
-                match &mut self.mode {
-                    Mode::NewAgent {
-                        focus,
-                        repo_index,
-                        source,
-                        source_query,
-                        source_index,
-                        issues,
-                        mrs,
-                        selected_issue,
-                        selected_mr,
-                        base_index,
-                        branches,
-                        branch_mode,
-                        existing_branches,
-                        agent_name,
-                        prompt,
-                        branch_name,
-                        name_pristine,
-                        ..
-                    } => match focus {
-                        NewAgentFocus::Source => {
-                            *source = match *source {
-                                NewAgentSource::Issue => NewAgentSource::Mr,
-                                NewAgentSource::Mr => NewAgentSource::Branch,
-                                NewAgentSource::Branch => NewAgentSource::Issue,
-                            };
-                            *source_index = 0;
-                            source_query.clear();
-                            match *source {
-                                NewAgentSource::Issue => {
-                                    *issues = RemoteList::Loading;
-                                    load_gitlab_issues = repos.get(*repo_index).cloned();
-                                }
-                                NewAgentSource::Mr => {
-                                    *mrs = RemoteList::Loading;
-                                    load_gitlab_mrs = repos.get(*repo_index).cloned();
-                                }
-                                NewAgentSource::Branch => {}
-                            }
-                            *prompt = prompt_for_source(*source, selected_issue, selected_mr);
-                        }
-                        NewAgentFocus::Agent => {
-                            if let Some(n) = next_agent_name {
-                                *agent_name = n;
-                            }
-                        }
-                        NewAgentFocus::Repo => {
-                            if repo_count > 1 {
-                                *repo_index = (*repo_index + 1) % repo_count;
-                                reload_branches = true;
-                                match *source {
-                                    NewAgentSource::Issue => {
-                                        *source_index = 0;
-                                        source_query.clear();
-                                        *selected_issue = None;
-                                        *issues = RemoteList::Loading;
-                                        load_gitlab_issues = repos.get(*repo_index).cloned();
-                                    }
-                                    NewAgentSource::Mr => {
-                                        *source_index = 0;
-                                        source_query.clear();
-                                        *selected_mr = None;
-                                        *mrs = RemoteList::Loading;
-                                        load_gitlab_mrs = repos.get(*repo_index).cloned();
-                                    }
-                                    NewAgentSource::Branch => {}
-                                }
-                                *prompt = prompt_for_source(*source, selected_issue, selected_mr);
-                            }
-                        }
-                        NewAgentFocus::BranchToggle => {
-                            *branch_mode = match branch_mode {
-                                BranchMode::New => BranchMode::Existing,
-                                BranchMode::Existing => BranchMode::New,
-                            };
-                            *base_index = 0;
-                        }
-                        NewAgentFocus::BranchList => {
-                            let count = match branch_mode {
-                                BranchMode::New => branches.len(),
-                                BranchMode::Existing => existing_branches.len(),
-                            };
-                            if count > 0 {
-                                *base_index = (*base_index + 1) % count;
-                            }
-                        }
-                        NewAgentFocus::Search | NewAgentFocus::SourceList => match source {
-                            NewAgentSource::Issue => {
-                                if let RemoteList::Loaded(items) = issues {
-                                    let indices = filtered_issue_indices(items, source_query);
-                                    if !indices.is_empty() {
-                                        let next = indices
-                                            .iter()
-                                            .position(|i| i == source_index)
-                                            .map(|pos| indices[(pos + 1) % indices.len()])
-                                            .unwrap_or(indices[0]);
-                                        select_issue_by_index(
-                                            items,
-                                            next,
-                                            source_index,
-                                            selected_issue,
-                                            prompt,
-                                            branches,
-                                            branch_name,
-                                            name_pristine,
-                                        );
-                                    }
-                                }
-                            }
-                            NewAgentSource::Mr => {
-                                if let RemoteList::Loaded(items) = mrs {
-                                    let indices = filtered_mr_indices(items, source_query);
-                                    if !indices.is_empty() {
-                                        let next = indices
-                                            .iter()
-                                            .position(|i| i == source_index)
-                                            .map(|pos| indices[(pos + 1) % indices.len()])
-                                            .unwrap_or(indices[0]);
-                                        select_mr_by_index(
-                                            items,
-                                            next,
-                                            source_index,
-                                            selected_mr,
-                                            prompt,
-                                        );
-                                    }
-                                }
-                            }
-                            NewAgentSource::Branch => {}
-                        },
-                        _ => {}
-                    },
-                    _ => {}
-                }
-                if reload_branches && let Some(cmd) = self.reload_branches_command() {
-                    cmds.push(cmd);
-                }
-                if let Some(repo) = load_gitlab_issues {
-                    cmds.push(Command::LoadGitlabIssues(repo));
-                }
-                if let Some(repo) = load_gitlab_mrs {
-                    cmds.push(Command::LoadGitlabMrs(repo));
+                if let Mode::NewAgent(state) = &mut self.mode {
+                    if state.focus == NewAgentFocus::Agent {
+                        state.agent_name = self.config.cycle_next(&state.agent_name).to_string();
+                    }
+                    let today = chrono_free_date_str();
+                    let effects = state.move_picker(Direction::Next, repo_count, &today);
+                    if effects.reload_branches
+                        && let Some(repo) = repos.get(state.repo_index)
+                    {
+                        cmds.push(Command::LoadBranches(repo.clone()));
+                    }
+                    if effects.load_issues
+                        && let Some(repo) = repos.get(state.repo_index)
+                    {
+                        cmds.push(Command::LoadGitlabIssues(repo.clone()));
+                    }
+                    if effects.load_mrs
+                        && let Some(repo) = repos.get(state.repo_index)
+                    {
+                        cmds.push(Command::LoadGitlabMrs(repo.clone()));
+                    }
                 }
             }
             Action::PickerPrev => {
-                let mut reload_branches = false;
-                let mut load_gitlab_issues = None;
-                let mut load_gitlab_mrs = None;
                 let repos = self.config.resolved_repos();
                 let repo_count = repos.len();
-                let prev_agent_name: Option<String> = if let Mode::NewAgent {
-                    focus: NewAgentFocus::Agent,
-                    agent_name,
-                    ..
-                } = &self.mode
-                {
-                    Some(self.config.cycle_prev(agent_name).to_string())
-                } else {
-                    None
-                };
-                match &mut self.mode {
-                    Mode::NewAgent {
-                        focus,
-                        repo_index,
-                        source,
-                        source_query,
-                        source_index,
-                        issues,
-                        mrs,
-                        selected_issue,
-                        selected_mr,
-                        base_index,
-                        branches,
-                        branch_mode,
-                        existing_branches,
-                        agent_name,
-                        prompt,
-                        branch_name,
-                        name_pristine,
-                        ..
-                    } => match focus {
-                        NewAgentFocus::Source => {
-                            *source = match *source {
-                                NewAgentSource::Issue => NewAgentSource::Branch,
-                                NewAgentSource::Branch => NewAgentSource::Mr,
-                                NewAgentSource::Mr => NewAgentSource::Issue,
-                            };
-                            *source_index = 0;
-                            source_query.clear();
-                            match *source {
-                                NewAgentSource::Issue => {
-                                    *issues = RemoteList::Loading;
-                                    load_gitlab_issues = repos.get(*repo_index).cloned();
-                                }
-                                NewAgentSource::Mr => {
-                                    *mrs = RemoteList::Loading;
-                                    load_gitlab_mrs = repos.get(*repo_index).cloned();
-                                }
-                                NewAgentSource::Branch => {}
-                            }
-                            *prompt = prompt_for_source(*source, selected_issue, selected_mr);
-                        }
-                        NewAgentFocus::Agent => {
-                            if let Some(n) = prev_agent_name {
-                                *agent_name = n;
-                            }
-                        }
-                        NewAgentFocus::Repo => {
-                            if repo_count > 1 {
-                                *repo_index = repo_index.checked_sub(1).unwrap_or(repo_count - 1);
-                                reload_branches = true;
-                                match *source {
-                                    NewAgentSource::Issue => {
-                                        *source_index = 0;
-                                        source_query.clear();
-                                        *selected_issue = None;
-                                        *issues = RemoteList::Loading;
-                                        load_gitlab_issues = repos.get(*repo_index).cloned();
-                                    }
-                                    NewAgentSource::Mr => {
-                                        *source_index = 0;
-                                        source_query.clear();
-                                        *selected_mr = None;
-                                        *mrs = RemoteList::Loading;
-                                        load_gitlab_mrs = repos.get(*repo_index).cloned();
-                                    }
-                                    NewAgentSource::Branch => {}
-                                }
-                                *prompt = prompt_for_source(*source, selected_issue, selected_mr);
-                            }
-                        }
-                        NewAgentFocus::BranchToggle => {
-                            *branch_mode = match branch_mode {
-                                BranchMode::New => BranchMode::Existing,
-                                BranchMode::Existing => BranchMode::New,
-                            };
-                            *base_index = 0;
-                        }
-                        NewAgentFocus::BranchList => {
-                            let count = match branch_mode {
-                                BranchMode::New => branches.len(),
-                                BranchMode::Existing => existing_branches.len(),
-                            };
-                            if count > 0 {
-                                *base_index = base_index.checked_sub(1).unwrap_or(count - 1);
-                            }
-                        }
-                        NewAgentFocus::Search | NewAgentFocus::SourceList => match source {
-                            NewAgentSource::Issue => {
-                                if let RemoteList::Loaded(items) = issues {
-                                    let indices = filtered_issue_indices(items, source_query);
-                                    if !indices.is_empty() {
-                                        let prev = indices
-                                            .iter()
-                                            .position(|i| i == source_index)
-                                            .map(|pos| {
-                                                indices[pos
-                                                    .checked_sub(1)
-                                                    .unwrap_or(indices.len() - 1)]
-                                            })
-                                            .unwrap_or_else(|| indices[indices.len() - 1]);
-                                        select_issue_by_index(
-                                            items,
-                                            prev,
-                                            source_index,
-                                            selected_issue,
-                                            prompt,
-                                            branches,
-                                            branch_name,
-                                            name_pristine,
-                                        );
-                                    }
-                                }
-                            }
-                            NewAgentSource::Mr => {
-                                if let RemoteList::Loaded(items) = mrs {
-                                    let indices = filtered_mr_indices(items, source_query);
-                                    if !indices.is_empty() {
-                                        let prev = indices
-                                            .iter()
-                                            .position(|i| i == source_index)
-                                            .map(|pos| {
-                                                indices[pos
-                                                    .checked_sub(1)
-                                                    .unwrap_or(indices.len() - 1)]
-                                            })
-                                            .unwrap_or_else(|| indices[indices.len() - 1]);
-                                        select_mr_by_index(
-                                            items,
-                                            prev,
-                                            source_index,
-                                            selected_mr,
-                                            prompt,
-                                        );
-                                    }
-                                }
-                            }
-                            NewAgentSource::Branch => {}
-                        },
-                        _ => {}
-                    },
-                    _ => {}
-                }
-                if reload_branches && let Some(cmd) = self.reload_branches_command() {
-                    cmds.push(cmd);
-                }
-                if let Some(repo) = load_gitlab_issues {
-                    cmds.push(Command::LoadGitlabIssues(repo));
-                }
-                if let Some(repo) = load_gitlab_mrs {
-                    cmds.push(Command::LoadGitlabMrs(repo));
+                if let Mode::NewAgent(state) = &mut self.mode {
+                    if state.focus == NewAgentFocus::Agent {
+                        state.agent_name = self.config.cycle_prev(&state.agent_name).to_string();
+                    }
+                    let today = chrono_free_date_str();
+                    let effects = state.move_picker(Direction::Prev, repo_count, &today);
+                    if effects.reload_branches
+                        && let Some(repo) = repos.get(state.repo_index)
+                    {
+                        cmds.push(Command::LoadBranches(repo.clone()));
+                    }
+                    if effects.load_issues
+                        && let Some(repo) = repos.get(state.repo_index)
+                    {
+                        cmds.push(Command::LoadGitlabIssues(repo.clone()));
+                    }
+                    if effects.load_mrs
+                        && let Some(repo) = repos.get(state.repo_index)
+                    {
+                        cmds.push(Command::LoadGitlabMrs(repo.clone()));
+                    }
                 }
             }
             Action::PickerConfirm => {
@@ -1100,51 +701,34 @@ impl App {
 
                 let mut status_on_none = None;
                 let result = match &self.mode {
-                    Mode::NewAgent {
-                        repo_index,
-                        source,
-                        branch_mode,
-                        prompt,
-                        base_index,
-                        branches,
-                        existing_branches,
-                        branch_name,
-                        selected_issue,
-                        selected_mr,
-                        source_query,
-                        source_index,
-                        issues,
-                        mrs,
-                        agent_name,
-                        ..
-                    } => {
+                    Mode::NewAgent(state) => {
                         let repos = self.config.resolved_repos();
                         let repo = if repos.is_empty() {
                             None
                         } else {
-                            repos.get(*repo_index % repos.len()).cloned()
+                            repos.get(state.repo_index % repos.len()).cloned()
                         };
                         let repo = match repo {
                             Some(repo) => repo,
                             None => return cmds,
                         };
-                        let prompt_opt = if prompt.is_empty() {
+                        let prompt_opt = if state.prompt.is_empty() {
                             None
                         } else {
-                            Some(prompt.clone())
+                            Some(state.prompt.clone())
                         };
-                        let name = agent_name.clone();
+                        let name = state.agent_name.clone();
 
-                        match source {
+                        match state.source {
                             NewAgentSource::Issue => {
                                 if !issue_selection_is_visible(
-                                    issues,
-                                    source_query,
-                                    *source_index,
-                                    selected_issue,
+                                    &state.issues,
+                                    &state.source_query,
+                                    state.source_index,
+                                    &state.selected_issue,
                                 ) {
                                     status_on_none = Some(
-                                        if selected_issue.is_some() {
+                                        if state.selected_issue.is_some() {
                                             "No matching issue selected"
                                         } else {
                                             "No issue selected"
@@ -1153,15 +737,16 @@ impl App {
                                     );
                                     None
                                 } else {
-                                    let base = branches
-                                        .get(*base_index)
+                                    let base = state
+                                        .branches
+                                        .get(state.base_index)
                                         .cloned()
                                         .unwrap_or_else(|| "main".to_string());
-                                    let branch_label = if branch_name.is_empty() {
+                                    let branch_label = if state.branch_name.is_empty() {
                                         let today = chrono_free_date_str();
-                                        generate_branch_name(branches, &today)
+                                        generate_branch_name(&state.branches, &today)
                                     } else {
-                                        branch_name.clone()
+                                        state.branch_name.clone()
                                     };
                                     Some(PendingCreate::Normal {
                                         repo,
@@ -1175,13 +760,15 @@ impl App {
                             }
                             NewAgentSource::Mr => {
                                 if mr_selection_is_visible(
-                                    mrs,
-                                    source_query,
-                                    *source_index,
-                                    selected_mr,
+                                    &state.mrs,
+                                    &state.source_query,
+                                    state.source_index,
+                                    &state.selected_mr,
                                 ) {
-                                    let mr =
-                                        selected_mr.as_ref().expect("visible MR has selection");
+                                    let mr = state
+                                        .selected_mr
+                                        .as_ref()
+                                        .expect("visible MR has selection");
                                     Some(PendingCreate::GitlabMr {
                                         repo,
                                         mr_iid: mr.iid,
@@ -1191,7 +778,7 @@ impl App {
                                     })
                                 } else {
                                     status_on_none = Some(
-                                        if selected_mr.is_some() {
+                                        if state.selected_mr.is_some() {
                                             "No matching merge request selected"
                                         } else {
                                             "No merge request selected"
@@ -1201,17 +788,18 @@ impl App {
                                     None
                                 }
                             }
-                            NewAgentSource::Branch => match branch_mode {
+                            NewAgentSource::Branch => match state.branch_mode {
                                 BranchMode::New => {
-                                    let base = branches
-                                        .get(*base_index)
+                                    let base = state
+                                        .branches
+                                        .get(state.base_index)
                                         .cloned()
                                         .unwrap_or_else(|| "main".to_string());
-                                    let branch_label = if branch_name.is_empty() {
+                                    let branch_label = if state.branch_name.is_empty() {
                                         let today = chrono_free_date_str();
-                                        generate_branch_name(branches, &today)
+                                        generate_branch_name(&state.branches, &today)
                                     } else {
-                                        branch_name.clone()
+                                        state.branch_name.clone()
                                     };
                                     Some(PendingCreate::Normal {
                                         repo,
@@ -1222,18 +810,17 @@ impl App {
                                         agent_name: name,
                                     })
                                 }
-                                BranchMode::Existing => {
-                                    existing_branches.get(*base_index).map(|selected| {
-                                        PendingCreate::Normal {
-                                            repo,
-                                            branch: selected.clone(),
-                                            new_branch: false,
-                                            base_branch: None,
-                                            prompt: prompt_opt,
-                                            agent_name: name,
-                                        }
-                                    })
-                                }
+                                BranchMode::Existing => state
+                                    .existing_branches
+                                    .get(state.base_index)
+                                    .map(|selected| PendingCreate::Normal {
+                                        repo,
+                                        branch: selected.clone(),
+                                        new_branch: false,
+                                        base_branch: None,
+                                        prompt: prompt_opt,
+                                        agent_name: name,
+                                    }),
                             },
                         }
                     }
@@ -1342,151 +929,25 @@ impl App {
                     self.mode = Mode::Normal;
                 } else if let Some(status) = status_on_none {
                     self.status_message = Some(status);
-                } else if matches!(
-                    self.mode,
-                    Mode::NewAgent {
-                        branch_mode: BranchMode::Existing,
-                        ..
-                    }
-                ) {
+                } else if matches!(&self.mode, Mode::NewAgent(state) if state.branch_mode == BranchMode::Existing)
+                {
                     self.status_message = Some("No existing branches available".into());
                 }
             }
 
             // --- Text input ---
-            Action::TypeChar(c) => match &mut self.mode {
-                Mode::NewAgent {
-                    focus,
-                    source,
-                    source_query,
-                    source_index,
-                    issues,
-                    mrs,
-                    selected_issue,
-                    selected_mr,
-                    prompt,
-                    branches,
-                    branch_name,
-                    name_pristine,
-                    ..
-                } => match focus {
-                    NewAgentFocus::Search => {
-                        source_query.push(c);
-                        match source {
-                            NewAgentSource::Issue => {
-                                if let RemoteList::Loaded(items) = issues {
-                                    if let Some(index) =
-                                        filtered_issue_indices(items, source_query).first().copied()
-                                    {
-                                        select_issue_by_index(
-                                            items,
-                                            index,
-                                            source_index,
-                                            selected_issue,
-                                            prompt,
-                                            branches,
-                                            branch_name,
-                                            name_pristine,
-                                        );
-                                    }
-                                }
-                            }
-                            NewAgentSource::Mr => {
-                                if let RemoteList::Loaded(items) = mrs {
-                                    if let Some(index) =
-                                        filtered_mr_indices(items, source_query).first().copied()
-                                    {
-                                        select_mr_by_index(
-                                            items,
-                                            index,
-                                            source_index,
-                                            selected_mr,
-                                            prompt,
-                                        );
-                                    }
-                                }
-                            }
-                            NewAgentSource::Branch => {}
-                        }
-                    }
-                    NewAgentFocus::Name => {
-                        if *name_pristine {
-                            branch_name.clear();
-                            *name_pristine = false;
-                        }
-                        branch_name.push(c);
-                    }
-                    _ => {}
-                },
-                _ => {}
-            },
-            Action::TypeBackspace => match &mut self.mode {
-                Mode::NewAgent {
-                    focus,
-                    source,
-                    source_query,
-                    source_index,
-                    issues,
-                    mrs,
-                    selected_issue,
-                    selected_mr,
-                    prompt,
-                    branches,
-                    branch_name,
-                    name_pristine,
-                    ..
-                } => match focus {
-                    NewAgentFocus::Search => {
-                        source_query.pop();
-                        match source {
-                            NewAgentSource::Issue => {
-                                if let RemoteList::Loaded(items) = issues {
-                                    if let Some(index) =
-                                        filtered_issue_indices(items, source_query).first().copied()
-                                    {
-                                        select_issue_by_index(
-                                            items,
-                                            index,
-                                            source_index,
-                                            selected_issue,
-                                            prompt,
-                                            branches,
-                                            branch_name,
-                                            name_pristine,
-                                        );
-                                    }
-                                }
-                            }
-                            NewAgentSource::Mr => {
-                                if let RemoteList::Loaded(items) = mrs {
-                                    if let Some(index) =
-                                        filtered_mr_indices(items, source_query).first().copied()
-                                    {
-                                        select_mr_by_index(
-                                            items,
-                                            index,
-                                            source_index,
-                                            selected_mr,
-                                            prompt,
-                                        );
-                                    }
-                                }
-                            }
-                            NewAgentSource::Branch => {}
-                        }
-                    }
-                    NewAgentFocus::Name => {
-                        if *name_pristine {
-                            branch_name.clear();
-                            *name_pristine = false;
-                        } else {
-                            branch_name.pop();
-                        }
-                    }
-                    _ => {}
-                },
-                _ => {}
-            },
+            Action::TypeChar(c) => {
+                if let Mode::NewAgent(state) = &mut self.mode {
+                    let today = chrono_free_date_str();
+                    state.type_char(c, &today);
+                }
+            }
+            Action::TypeBackspace => {
+                if let Mode::NewAgent(state) = &mut self.mode {
+                    let today = chrono_free_date_str();
+                    state.backspace(&today);
+                }
+            }
 
             // --- Agent lifecycle ---
             Action::KillSession(name) => {
@@ -1716,6 +1177,11 @@ impl App {
                 } else if self.selected >= self.agents.len() {
                     self.selected = self.agents.len() - 1;
                 }
+                self.capture_pending.retain(|session| {
+                    self.agents
+                        .iter()
+                        .any(|agent| agent.session_name == *session)
+                });
             }
             Action::ActivityCaptured {
                 session_name,
@@ -1723,6 +1189,7 @@ impl App {
                 content_hash,
                 attached_count,
             } => {
+                self.capture_pending.remove(&session_name);
                 // If this capture is for the currently-selected agent, the
                 // pane content doubles as preview material.
                 let is_selected = self
@@ -1791,14 +1258,17 @@ impl App {
                     }
                 }
             }
+            Action::ActivityCaptureFailed { session_name } => {
+                self.capture_pending.remove(&session_name);
+            }
             Action::BranchesLoaded {
                 repo,
                 branches: new_branches,
             } => {
                 let repos = self.config.resolved_repos();
                 let accepts_result = match &self.mode {
-                    Mode::NewAgent { repo_index, .. } => repos
-                        .get(*repo_index)
+                    Mode::NewAgent(state) => repos
+                        .get(state.repo_index)
                         .is_some_and(|current| current == &repo),
                     _ => false,
                 };
@@ -1807,33 +1277,21 @@ impl App {
                     .iter()
                     .map(|a| (a.repo_path.clone(), a.branch.clone()))
                     .collect();
-                if accepts_result
-                    && let Mode::NewAgent {
-                        branches,
-                        base_index,
-                        branch_name,
-                        name_pristine,
-                        existing_branches,
-                        repo_index,
-                        source,
-                        selected_issue,
-                        ..
-                    } = &mut self.mode
-                {
+                if accepts_result && let Mode::NewAgent(state) = &mut self.mode {
                     let today = chrono_free_date_str();
-                    if *name_pristine {
-                        *branch_name = match (source, selected_issue.as_ref()) {
+                    if state.name_pristine {
+                        state.branch_name = match (state.source, state.selected_issue.as_ref()) {
                             (NewAgentSource::Issue, Some(issue)) => {
                                 crate::gitlab::issue_branch_name(issue, &today, &new_branches)
                             }
                             _ => generate_branch_name(&new_branches, &today),
                         };
-                        *name_pristine = true;
+                        state.name_pristine = true;
                     }
-                    *base_index = find_main_branch(&new_branches);
+                    state.base_index = find_main_branch(&new_branches);
 
-                    let repo_path = repos.get(*repo_index).cloned();
-                    *existing_branches = new_branches
+                    let repo_path = repos.get(state.repo_index).cloned();
+                    state.existing_branches = new_branches
                         .iter()
                         .filter(|b| {
                             !worktree_branches.iter().any(|(rp, ab)| {
@@ -1843,25 +1301,22 @@ impl App {
                         .cloned()
                         .collect();
 
-                    *branches = new_branches;
+                    state.branches = new_branches;
                 }
             }
             Action::EditPrompt => {
-                if let Mode::NewAgent {
-                    focus: NewAgentFocus::Prompt,
-                    prompt,
-                    ..
-                } = &self.mode
+                if let Mode::NewAgent(state) = &self.mode
+                    && state.focus == NewAgentFocus::Prompt
                 {
                     cmds.push(Command::EditPrompt {
-                        initial_prompt: prompt.clone(),
+                        initial_prompt: state.prompt.clone(),
                     });
                 }
             }
             Action::PromptEdited(result) => match result {
                 Ok(edited) => {
-                    if let Mode::NewAgent { prompt, .. } = &mut self.mode {
-                        *prompt = edited;
+                    if let Mode::NewAgent(state) = &mut self.mode {
+                        state.prompt = edited;
                     }
                 }
                 Err(error) => {
@@ -1870,105 +1325,86 @@ impl App {
             },
             Action::GitlabIssuesLoaded { repo, result } => {
                 let accepts_result = match &self.mode {
-                    Mode::NewAgent {
-                        repo_index, source, ..
-                    } => {
-                        matches!(source, NewAgentSource::Issue)
+                    Mode::NewAgent(state) => {
+                        matches!(state.source, NewAgentSource::Issue)
                             && self
                                 .config
                                 .resolved_repos()
-                                .get(*repo_index)
+                                .get(state.repo_index)
                                 .is_some_and(|current| current == &repo)
                     }
                     _ => false,
                 };
-                if accepts_result
-                    && let Mode::NewAgent {
-                        issues,
-                        selected_issue,
-                        source_index,
-                        prompt,
-                        branches,
-                        branch_name,
-                        name_pristine,
-                        ..
-                    } = &mut self.mode
-                {
+                if accepts_result && let Mode::NewAgent(state) = &mut self.mode {
                     match result {
                         Ok(items) => {
                             let first = items.first().cloned();
-                            *issues = RemoteList::Loaded(items);
-                            *source_index = 0;
-                            *selected_issue = first.clone();
+                            state.issues = RemoteList::Loaded(items);
+                            state.source_index = 0;
+                            state.selected_issue = first.clone();
                             match first {
                                 Some(issue) => {
-                                    *prompt = crate::gitlab::issue_prompt(&issue);
+                                    state.prompt = crate::gitlab::issue_prompt(&issue);
                                     let today = chrono_free_date_str();
-                                    *branch_name =
-                                        crate::gitlab::issue_branch_name(&issue, &today, branches);
-                                    *name_pristine = true;
+                                    state.branch_name = crate::gitlab::issue_branch_name(
+                                        &issue,
+                                        &today,
+                                        &state.branches,
+                                    );
+                                    state.name_pristine = true;
                                 }
                                 None => {
-                                    prompt.clear();
+                                    state.prompt.clear();
                                     let today = chrono_free_date_str();
-                                    *branch_name = generate_branch_name(branches, &today);
-                                    *name_pristine = true;
+                                    state.branch_name =
+                                        generate_branch_name(&state.branches, &today);
+                                    state.name_pristine = true;
                                 }
                             }
                         }
                         Err(error) => {
-                            *issues = RemoteList::Failed(error);
-                            *selected_issue = None;
-                            prompt.clear();
+                            state.issues = RemoteList::Failed(error);
+                            state.selected_issue = None;
+                            state.prompt.clear();
                             let today = chrono_free_date_str();
-                            *branch_name = generate_branch_name(branches, &today);
-                            *name_pristine = true;
+                            state.branch_name = generate_branch_name(&state.branches, &today);
+                            state.name_pristine = true;
                         }
                     }
                 }
             }
             Action::GitlabMrsLoaded { repo, result } => {
                 let accepts_result = match &self.mode {
-                    Mode::NewAgent {
-                        repo_index, source, ..
-                    } => {
-                        matches!(source, NewAgentSource::Mr)
+                    Mode::NewAgent(state) => {
+                        matches!(state.source, NewAgentSource::Mr)
                             && self
                                 .config
                                 .resolved_repos()
-                                .get(*repo_index)
+                                .get(state.repo_index)
                                 .is_some_and(|current| current == &repo)
                     }
                     _ => false,
                 };
-                if accepts_result
-                    && let Mode::NewAgent {
-                        mrs,
-                        selected_mr,
-                        source_index,
-                        prompt,
-                        ..
-                    } = &mut self.mode
-                {
+                if accepts_result && let Mode::NewAgent(state) = &mut self.mode {
                     match result {
                         Ok(items) => {
                             let first = items.first().cloned();
-                            *mrs = RemoteList::Loaded(items);
-                            *source_index = 0;
-                            *selected_mr = first.clone();
+                            state.mrs = RemoteList::Loaded(items);
+                            state.source_index = 0;
+                            state.selected_mr = first.clone();
                             match first {
                                 Some(mr) => {
-                                    *prompt = crate::gitlab::mr_prompt(&mr);
+                                    state.prompt = crate::gitlab::mr_prompt(&mr);
                                 }
                                 None => {
-                                    prompt.clear();
+                                    state.prompt.clear();
                                 }
                             }
                         }
                         Err(error) => {
-                            *mrs = RemoteList::Failed(error);
-                            *selected_mr = None;
-                            prompt.clear();
+                            state.mrs = RemoteList::Failed(error);
+                            state.selected_mr = None;
+                            state.prompt.clear();
                         }
                     }
                 }
@@ -2149,11 +1585,15 @@ impl App {
                 // (replaces the coarse-grained tmux window_activity timestamp), and
                 // the selected agent's capture doubles as preview content.
                 if self.spinner_frame.is_multiple_of(5) {
-                    for agent in &self.agents {
-                        if agent.status.has_session() {
-                            cmds.push(Command::CaptureActivity {
-                                session_name: agent.session_name.clone(),
-                            });
+                    let sessions: Vec<_> = self
+                        .agents
+                        .iter()
+                        .filter(|agent| agent.status.has_session())
+                        .map(|agent| agent.session_name.clone())
+                        .collect();
+                    for session in sessions {
+                        if let Some(cmd) = self.schedule_capture(&session) {
+                            cmds.push(cmd);
                         }
                     }
                 }
@@ -2180,77 +1620,15 @@ impl App {
             }
 
             Action::FocusNext => {
-                if let Mode::NewAgent {
-                    focus,
-                    source,
-                    branch_mode,
-                    branch_name,
-                    branches,
-                    name_pristine,
-                    ..
-                } = &mut self.mode
-                {
-                    if *focus == NewAgentFocus::Name && branch_name.is_empty() {
-                        let today = chrono_free_date_str();
-                        *branch_name = generate_branch_name(branches, &today);
-                        *name_pristine = true;
-                    }
-                    *focus = match (&*focus, &*source, &*branch_mode) {
-                        (NewAgentFocus::Repo, _, _) => NewAgentFocus::Source,
-                        (NewAgentFocus::Source, NewAgentSource::Issue | NewAgentSource::Mr, _) => {
-                            NewAgentFocus::Search
-                        }
-                        (NewAgentFocus::Source, NewAgentSource::Branch, _) => {
-                            NewAgentFocus::BranchToggle
-                        }
-                        (NewAgentFocus::Search, _, _) => NewAgentFocus::SourceList,
-                        (NewAgentFocus::SourceList, _, _) => NewAgentFocus::Prompt,
-                        (NewAgentFocus::BranchToggle, _, _) => NewAgentFocus::BranchList,
-                        (NewAgentFocus::BranchList, NewAgentSource::Branch, BranchMode::New) => {
-                            NewAgentFocus::Name
-                        }
-                        (NewAgentFocus::BranchList, _, _) => NewAgentFocus::Prompt,
-                        (NewAgentFocus::Name, _, _) => NewAgentFocus::Prompt,
-                        (NewAgentFocus::Prompt, _, _) => NewAgentFocus::Agent,
-                        (NewAgentFocus::Agent, _, _) => NewAgentFocus::Repo,
-                    };
+                if let Mode::NewAgent(state) = &mut self.mode {
+                    let today = chrono_free_date_str();
+                    state.focus_next(&today);
                 }
             }
             Action::FocusPrev => {
-                if let Mode::NewAgent {
-                    focus,
-                    source,
-                    branch_mode,
-                    branch_name,
-                    branches,
-                    name_pristine,
-                    ..
-                } = &mut self.mode
-                {
-                    if *focus == NewAgentFocus::Name && branch_name.is_empty() {
-                        let today = chrono_free_date_str();
-                        *branch_name = generate_branch_name(branches, &today);
-                        *name_pristine = true;
-                    }
-                    *focus = match (&*focus, &*source, &*branch_mode) {
-                        (NewAgentFocus::Repo, _, _) => NewAgentFocus::Agent,
-                        (NewAgentFocus::Source, _, _) => NewAgentFocus::Repo,
-                        (NewAgentFocus::Agent, _, _) => NewAgentFocus::Prompt,
-                        (NewAgentFocus::Search, _, _) => NewAgentFocus::Source,
-                        (NewAgentFocus::SourceList, _, _) => NewAgentFocus::Search,
-                        (NewAgentFocus::BranchToggle, _, _) => NewAgentFocus::Source,
-                        (NewAgentFocus::BranchList, _, _) => NewAgentFocus::BranchToggle,
-                        (NewAgentFocus::Name, _, _) => NewAgentFocus::BranchList,
-                        (NewAgentFocus::Prompt, NewAgentSource::Issue | NewAgentSource::Mr, _) => {
-                            NewAgentFocus::SourceList
-                        }
-                        (NewAgentFocus::Prompt, NewAgentSource::Branch, BranchMode::New) => {
-                            NewAgentFocus::Name
-                        }
-                        (NewAgentFocus::Prompt, NewAgentSource::Branch, BranchMode::Existing) => {
-                            NewAgentFocus::BranchList
-                        }
-                    };
+                if let Mode::NewAgent(state) = &mut self.mode {
+                    let today = chrono_free_date_str();
+                    state.focus_prev(&today);
                 }
             }
         }
@@ -2305,11 +1683,11 @@ impl App {
                 KeyCode::Char('y') => Some(Action::MrMergeConfirmed),
                 _ => None,
             },
-            Mode::NewAgent { focus, .. } => match key.code {
+            Mode::NewAgent(state) => match key.code {
                 KeyCode::Esc => Some(Action::CancelMode),
                 KeyCode::Enter
                     if key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
-                        && matches!(focus, NewAgentFocus::Prompt) =>
+                        && matches!(state.focus, NewAgentFocus::Prompt) =>
                 {
                     None
                 }
@@ -2319,7 +1697,7 @@ impl App {
                 // Horizontal fields: Source, Agent, Repo, BranchToggle
                 KeyCode::Left
                     if matches!(
-                        focus,
+                        state.focus,
                         NewAgentFocus::Source
                             | NewAgentFocus::Agent
                             | NewAgentFocus::Repo
@@ -2330,7 +1708,7 @@ impl App {
                 }
                 KeyCode::Right
                     if matches!(
-                        focus,
+                        state.focus,
                         NewAgentFocus::Source
                             | NewAgentFocus::Agent
                             | NewAgentFocus::Repo
@@ -2341,39 +1719,51 @@ impl App {
                 }
                 // Vertical fields: SourceList, BranchList
                 KeyCode::Up
-                    if matches!(focus, NewAgentFocus::SourceList | NewAgentFocus::BranchList) =>
+                    if matches!(
+                        state.focus,
+                        NewAgentFocus::SourceList | NewAgentFocus::BranchList
+                    ) =>
                 {
                     Some(Action::PickerPrev)
                 }
                 KeyCode::Down
-                    if matches!(focus, NewAgentFocus::SourceList | NewAgentFocus::BranchList) =>
+                    if matches!(
+                        state.focus,
+                        NewAgentFocus::SourceList | NewAgentFocus::BranchList
+                    ) =>
                 {
                     Some(Action::PickerNext)
                 }
                 KeyCode::Char('k')
-                    if matches!(focus, NewAgentFocus::SourceList | NewAgentFocus::BranchList) =>
+                    if matches!(
+                        state.focus,
+                        NewAgentFocus::SourceList | NewAgentFocus::BranchList
+                    ) =>
                 {
                     Some(Action::PickerPrev)
                 }
                 KeyCode::Char('j')
-                    if matches!(focus, NewAgentFocus::SourceList | NewAgentFocus::BranchList) =>
+                    if matches!(
+                        state.focus,
+                        NewAgentFocus::SourceList | NewAgentFocus::BranchList
+                    ) =>
                 {
                     Some(Action::PickerNext)
                 }
                 // Text fields: Search, Name. Prompt text is edited through $EDITOR.
                 KeyCode::Backspace
-                    if matches!(focus, NewAgentFocus::Search | NewAgentFocus::Name) =>
+                    if matches!(state.focus, NewAgentFocus::Search | NewAgentFocus::Name) =>
                 {
                     Some(Action::TypeBackspace)
                 }
                 KeyCode::Char('e')
-                    if matches!(focus, NewAgentFocus::Prompt)
+                    if matches!(state.focus, NewAgentFocus::Prompt)
                         && key.modifiers == crossterm::event::KeyModifiers::NONE =>
                 {
                     Some(Action::EditPrompt)
                 }
                 KeyCode::Char(c)
-                    if matches!(focus, NewAgentFocus::Search | NewAgentFocus::Name) =>
+                    if matches!(state.focus, NewAgentFocus::Search | NewAgentFocus::Name) =>
                 {
                     Some(Action::TypeChar(c))
                 }
@@ -2401,19 +1791,33 @@ mod tests {
         App::new(config)
     }
 
+    fn new_agent_state(app: &App) -> &NewAgent {
+        match &app.mode {
+            Mode::NewAgent(state) => state,
+            _ => panic!("expected new-agent mode"),
+        }
+    }
+
+    fn new_agent_state_mut(app: &mut App) -> &mut NewAgent {
+        match &mut app.mode {
+            Mode::NewAgent(state) => state,
+            _ => panic!("expected new-agent mode"),
+        }
+    }
+
     macro_rules! branch_new_agent_mode {
-        ($($field:ident : $value:expr),* $(,)?) => {
-            Mode::NewAgent {
-                source: NewAgentSource::Branch,
-                source_query: String::new(),
-                source_index: 0,
-                issues: RemoteList::Idle,
-                mrs: RemoteList::Idle,
-                selected_issue: None,
-                selected_mr: None,
-                $($field: $value,)*
-            }
-        };
+        ($($field:ident : $value:expr),* $(,)?) => {{
+            let mut state = NewAgent::new("0409", "codex".to_string());
+            state.source = NewAgentSource::Branch;
+            state.source_query = String::new();
+            state.source_index = 0;
+            state.issues = RemoteList::Idle;
+            state.mrs = RemoteList::Idle;
+            state.selected_issue = None;
+            state.selected_mr = None;
+            $(state.$field = $value;)*
+            Mode::NewAgent(Box::new(state))
+        }};
     }
 
     #[test]
@@ -3319,7 +2723,7 @@ mod tests {
     fn start_new_agent_enters_new_agent_mode() {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
-        assert!(matches!(app.mode, Mode::NewAgent { .. }));
+        assert!(matches!(app.mode, Mode::NewAgent(_)));
     }
 
     #[test]
@@ -3328,14 +2732,9 @@ mod tests {
 
         let cmds = app.update(Action::StartNewAgent);
 
-        assert!(matches!(
-            app.mode,
-            Mode::NewAgent {
-                source: NewAgentSource::Issue,
-                focus: NewAgentFocus::Repo,
-                ..
-            }
-        ));
+        let state = new_agent_state(&app);
+        assert_eq!(state.source, NewAgentSource::Issue);
+        assert_eq!(state.focus, NewAgentFocus::Repo);
         assert!(cmds.iter().any(|c| matches!(c, Command::LoadBranches(_))));
         assert!(
             cmds.iter()
@@ -3346,38 +2745,21 @@ mod tests {
     #[test]
     fn source_picker_cycles_from_issue_to_mr_to_branch() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { source, focus, .. } = &mut app.mode {
-            *source = NewAgentSource::Issue;
-            *focus = NewAgentFocus::Source;
+        {
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.focus = NewAgentFocus::Source;
         }
 
         let cmds = app.update(Action::PickerNext);
-        assert!(matches!(
-            app.mode,
-            Mode::NewAgent {
-                source: NewAgentSource::Mr,
-                ..
-            }
-        ));
+        assert_eq!(new_agent_state(&app).source, NewAgentSource::Mr);
         assert!(cmds.iter().any(|c| matches!(c, Command::LoadGitlabMrs(_))));
 
         app.update(Action::PickerNext);
-        assert!(matches!(
-            app.mode,
-            Mode::NewAgent {
-                source: NewAgentSource::Branch,
-                ..
-            }
-        ));
+        assert_eq!(new_agent_state(&app).source, NewAgentSource::Branch);
 
         app.update(Action::PickerNext);
-        assert!(matches!(
-            app.mode,
-            Mode::NewAgent {
-                source: NewAgentSource::Issue,
-                ..
-            }
-        ));
+        assert_eq!(new_agent_state(&app).source, NewAgentSource::Issue);
     }
 
     fn test_app_in_new_agent_mode() -> App {
@@ -3424,26 +2806,21 @@ mod tests {
     #[test]
     fn type_char_action_does_not_edit_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, prompt, .. } = &mut app.mode {
-            *focus = NewAgentFocus::Prompt;
-            *prompt = "generated".to_string();
+        {
+            let state = new_agent_state_mut(&mut app);
+            state.focus = NewAgentFocus::Prompt;
+            state.prompt = "generated".to_string();
         }
 
         app.update(Action::TypeChar('!'));
 
-        if let Mode::NewAgent { prompt, .. } = &app.mode {
-            assert_eq!(prompt, "generated");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        assert_eq!(new_agent_state(&app).prompt, "generated");
     }
 
     #[test]
     fn source_focus_left_right_maps_to_picker() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
-            *focus = NewAgentFocus::Source;
-        }
+        new_agent_state_mut(&mut app).focus = NewAgentFocus::Source;
 
         assert!(matches!(
             app.handle_key(make_key(KeyCode::Right)),
@@ -3458,9 +2835,7 @@ mod tests {
     #[test]
     fn prompt_reset_key_is_unused() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
-            *focus = NewAgentFocus::Prompt;
-        }
+        new_agent_state_mut(&mut app).focus = NewAgentFocus::Prompt;
 
         assert!(
             app.handle_key(make_key_with_modifiers(
@@ -3475,9 +2850,7 @@ mod tests {
     #[test]
     fn prompt_edit_key_opens_editor_in_prompt_focus() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
-            *focus = NewAgentFocus::Prompt;
-        }
+        new_agent_state_mut(&mut app).focus = NewAgentFocus::Prompt;
 
         assert!(matches!(
             app.handle_key(make_key(KeyCode::Char('e'))),
@@ -3488,9 +2861,10 @@ mod tests {
     #[test]
     fn edit_prompt_command_uses_current_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, prompt, .. } = &mut app.mode {
-            *focus = NewAgentFocus::Prompt;
-            *prompt = "generated prompt".to_string();
+        {
+            let state = new_agent_state_mut(&mut app);
+            state.focus = NewAgentFocus::Prompt;
+            state.prompt = "generated prompt".to_string();
         }
 
         let cmds = app.update(Action::EditPrompt);
@@ -3504,25 +2878,17 @@ mod tests {
     #[test]
     fn prompt_edited_replaces_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { prompt, .. } = &mut app.mode {
-            *prompt = "generated prompt".to_string();
-        }
+        new_agent_state_mut(&mut app).prompt = "generated prompt".to_string();
 
         app.update(Action::PromptEdited(Ok("edited prompt".to_string())));
 
-        if let Mode::NewAgent { prompt, .. } = &app.mode {
-            assert_eq!(prompt, "edited prompt");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        assert_eq!(new_agent_state(&app).prompt, "edited prompt");
     }
 
     #[test]
     fn prompt_left_right_are_unused() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
-            *focus = NewAgentFocus::Prompt;
-        }
+        new_agent_state_mut(&mut app).focus = NewAgentFocus::Prompt;
 
         assert!(app.handle_key(make_key(KeyCode::Right)).is_none());
         assert!(app.handle_key(make_key(KeyCode::Left)).is_none());
@@ -3531,9 +2897,7 @@ mod tests {
     #[test]
     fn gitlab_issues_loaded_selects_first_issue_and_generates_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { source, .. } = &mut app.mode {
-            *source = NewAgentSource::Issue;
-        }
+        new_agent_state_mut(&mut app).source = NewAgentSource::Issue;
 
         let current_repo = repo(&app, 0);
         app.update(Action::GitlabIssuesLoaded {
@@ -3541,29 +2905,17 @@ mod tests {
             result: Ok(vec![issue(1102, "Detect agents remotely")]),
         });
 
-        if let Mode::NewAgent {
-            issues,
-            selected_issue,
-            prompt,
-            source_index,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(*source_index, 0);
-            assert!(matches!(issues, RemoteList::Loaded(v) if v.len() == 1));
-            assert_eq!(selected_issue.as_ref().unwrap().iid, 1102);
-            assert!(prompt.starts_with("Work on GitLab issue #1102"));
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.source_index, 0);
+        assert!(matches!(&state.issues, RemoteList::Loaded(v) if v.len() == 1));
+        assert_eq!(state.selected_issue.as_ref().unwrap().iid, 1102);
+        assert!(state.prompt.starts_with("Work on GitLab issue #1102"));
     }
 
     #[test]
     fn gitlab_mrs_loaded_selects_first_mr_and_generates_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { source, .. } = &mut app.mode {
-            *source = NewAgentSource::Mr;
-        }
+        new_agent_state_mut(&mut app).source = NewAgentSource::Mr;
 
         let current_repo = repo(&app, 0);
         app.update(Action::GitlabMrsLoaded {
@@ -3575,29 +2927,17 @@ mod tests {
             )]),
         });
 
-        if let Mode::NewAgent {
-            mrs,
-            selected_mr,
-            prompt,
-            source_index,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(*source_index, 0);
-            assert!(matches!(mrs, RemoteList::Loaded(v) if v.len() == 1));
-            assert_eq!(selected_mr.as_ref().unwrap().iid, 184);
-            assert!(prompt.starts_with("Review GitLab MR !184"));
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.source_index, 0);
+        assert!(matches!(&state.mrs, RemoteList::Loaded(v) if v.len() == 1));
+        assert_eq!(state.selected_mr.as_ref().unwrap().iid, 184);
+        assert!(state.prompt.starts_with("Review GitLab MR !184"));
     }
 
     #[test]
     fn gitlab_issue_failure_stays_in_wizard() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { source, .. } = &mut app.mode {
-            *source = NewAgentSource::Issue;
-        }
+        new_agent_state_mut(&mut app).source = NewAgentSource::Issue;
 
         let current_repo = repo(&app, 0);
         app.update(Action::GitlabIssuesLoaded {
@@ -3606,20 +2946,18 @@ mod tests {
         });
 
         assert!(matches!(
-            app.mode,
-            Mode::NewAgent {
-                issues: RemoteList::Failed(_),
-                ..
-            }
+            &new_agent_state(&app).issues,
+            RemoteList::Failed(_)
         ));
     }
 
     #[test]
     fn issue_selection_replaces_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { source, prompt, .. } = &mut app.mode {
-            *source = NewAgentSource::Issue;
-            *prompt = "old prompt".to_string();
+        {
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.prompt = "old prompt".to_string();
         }
 
         let current_repo = repo(&app, 0);
@@ -3628,26 +2966,21 @@ mod tests {
             result: Ok(vec![issue(1102, "Detect agents remotely")]),
         });
 
-        if let Mode::NewAgent { prompt, .. } = &app.mode {
-            assert!(prompt.starts_with("Work on GitLab issue #1102"));
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        assert!(
+            new_agent_state(&app)
+                .prompt
+                .starts_with("Work on GitLab issue #1102")
+        );
     }
 
     #[test]
     fn stale_issue_result_ignored_after_switching_source() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            issues,
-            prompt,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Mr;
-            *issues = RemoteList::Loading;
-            *prompt = "review pending".to_string();
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Mr;
+            state.issues = RemoteList::Loading;
+            state.prompt = "review pending".to_string();
         }
 
         let current_repo = repo(&app, 0);
@@ -3656,19 +2989,10 @@ mod tests {
             result: Ok(vec![issue(77, "Stale issue")]),
         });
 
-        if let Mode::NewAgent {
-            issues,
-            selected_issue,
-            prompt,
-            ..
-        } = &app.mode
-        {
-            assert!(matches!(issues, RemoteList::Loading));
-            assert!(selected_issue.is_none());
-            assert_eq!(prompt, "review pending");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert!(matches!(&state.issues, RemoteList::Loading));
+        assert!(state.selected_issue.is_none());
+        assert_eq!(state.prompt, "review pending");
     }
 
     #[test]
@@ -3686,9 +3010,10 @@ mod tests {
             name_pristine: true,
             agent_name: "codex".to_string(),
         };
-        if let Mode::NewAgent { source, issues, .. } = &mut app.mode {
-            *source = NewAgentSource::Issue;
-            *issues = RemoteList::Loading;
+        {
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.issues = RemoteList::Loading;
         }
 
         let stale_repo = repo(&app, 0);
@@ -3697,34 +3022,20 @@ mod tests {
             result: Ok(vec![issue(77, "Stale issue")]),
         });
 
-        if let Mode::NewAgent {
-            issues,
-            selected_issue,
-            prompt,
-            ..
-        } = &app.mode
-        {
-            assert!(matches!(issues, RemoteList::Loading));
-            assert!(selected_issue.is_none());
-            assert_eq!(prompt, "pending");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert!(matches!(&state.issues, RemoteList::Loading));
+        assert!(state.selected_issue.is_none());
+        assert_eq!(state.prompt, "pending");
     }
 
     #[test]
     fn stale_mr_result_ignored_after_switching_source() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            mrs,
-            prompt,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Issue;
-            *mrs = RemoteList::Loading;
-            *prompt = "issue pending".to_string();
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.mrs = RemoteList::Loading;
+            state.prompt = "issue pending".to_string();
         }
 
         let current_repo = repo(&app, 0);
@@ -3733,19 +3044,10 @@ mod tests {
             result: Ok(vec![mr(44, "Stale MR", "stale-mr")]),
         });
 
-        if let Mode::NewAgent {
-            mrs,
-            selected_mr,
-            prompt,
-            ..
-        } = &app.mode
-        {
-            assert!(matches!(mrs, RemoteList::Loading));
-            assert!(selected_mr.is_none());
-            assert_eq!(prompt, "issue pending");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert!(matches!(&state.mrs, RemoteList::Loading));
+        assert!(state.selected_mr.is_none());
+        assert_eq!(state.prompt, "issue pending");
     }
 
     #[test]
@@ -3763,9 +3065,10 @@ mod tests {
             name_pristine: true,
             agent_name: "codex".to_string(),
         };
-        if let Mode::NewAgent { source, mrs, .. } = &mut app.mode {
-            *source = NewAgentSource::Mr;
-            *mrs = RemoteList::Loading;
+        {
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Mr;
+            state.mrs = RemoteList::Loading;
         }
 
         let stale_repo = repo(&app, 0);
@@ -3774,27 +3077,16 @@ mod tests {
             result: Ok(vec![mr(44, "Stale MR", "stale-mr")]),
         });
 
-        if let Mode::NewAgent {
-            mrs,
-            selected_mr,
-            prompt,
-            ..
-        } = &app.mode
-        {
-            assert!(matches!(mrs, RemoteList::Loading));
-            assert!(selected_mr.is_none());
-            assert_eq!(prompt, "pending");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert!(matches!(&state.mrs, RemoteList::Loading));
+        assert!(state.selected_mr.is_none());
+        assert_eq!(state.prompt, "pending");
     }
 
     #[test]
     fn branches_loaded_preserves_issue_derived_branch_name_with_collision() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { source, .. } = &mut app.mode {
-            *source = NewAgentSource::Issue;
-        }
+        new_agent_state_mut(&mut app).source = NewAgentSource::Issue;
         let selected = issue(1102, "Detect agents remotely");
         let current_repo = repo(&app, 0);
         app.update(Action::GitlabIssuesLoaded {
@@ -3810,37 +3102,25 @@ mod tests {
             branches: vec!["develop".into(), "main".into(), colliding_branch.clone()],
         });
 
-        if let Mode::NewAgent { branch_name, .. } = &app.mode {
-            let loaded_branches = vec!["develop".into(), "main".into(), colliding_branch];
-            let expected = crate::gitlab::issue_branch_name(&selected, &today, &loaded_branches);
-            assert_eq!(branch_name, &expected);
-            assert_ne!(branch_name, &generate_branch_name(&loaded_branches, &today));
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let branch_name = &new_agent_state(&app).branch_name;
+        let loaded_branches = vec!["develop".into(), "main".into(), colliding_branch];
+        let expected = crate::gitlab::issue_branch_name(&selected, &today, &loaded_branches);
+        assert_eq!(branch_name, &expected);
+        assert_ne!(branch_name, &generate_branch_name(&loaded_branches, &today));
     }
 
     #[test]
     fn gitlab_issue_empty_clears_generated_prompt_and_branch() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            issues,
-            selected_issue,
-            prompt,
-            branch_name,
-            branches,
-            name_pristine,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Issue;
-            *issues = RemoteList::Loaded(vec![issue(1, "Old issue")]);
-            *selected_issue = Some(issue(1, "Old issue"));
-            *prompt = "Work on GitLab issue #1: Old issue".to_string();
-            *branch_name = "z-0409-1-old-issue".to_string();
-            *branches = vec!["main".into()];
-            *name_pristine = false;
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.issues = RemoteList::Loaded(vec![issue(1, "Old issue")]);
+            state.selected_issue = Some(issue(1, "Old issue"));
+            state.prompt = "Work on GitLab issue #1: Old issue".to_string();
+            state.branch_name = "z-0409-1-old-issue".to_string();
+            state.branches = vec!["main".into()];
+            state.name_pristine = false;
         }
 
         let current_repo = repo(&app, 0);
@@ -3849,47 +3129,28 @@ mod tests {
             result: Ok(Vec::new()),
         });
 
-        if let Mode::NewAgent {
-            issues,
-            selected_issue,
-            prompt,
-            branch_name,
-            name_pristine,
-            ..
-        } = &app.mode
-        {
-            assert!(matches!(issues, RemoteList::Loaded(v) if v.is_empty()));
-            assert!(selected_issue.is_none());
-            assert_eq!(prompt, "");
-            assert_eq!(
-                branch_name,
-                &generate_branch_name(&["main".into()], &chrono_free_date_str())
-            );
-            assert!(*name_pristine);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert!(matches!(&state.issues, RemoteList::Loaded(v) if v.is_empty()));
+        assert!(state.selected_issue.is_none());
+        assert_eq!(state.prompt, "");
+        assert_eq!(
+            state.branch_name,
+            generate_branch_name(&["main".into()], &chrono_free_date_str())
+        );
+        assert!(state.name_pristine);
     }
 
     #[test]
     fn gitlab_issue_failure_clears_generated_prompt_and_branch() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            selected_issue,
-            prompt,
-            branch_name,
-            branches,
-            name_pristine,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Issue;
-            *selected_issue = Some(issue(1, "Old issue"));
-            *prompt = "Work on GitLab issue #1: Old issue".to_string();
-            *branch_name = "z-0409-1-old-issue".to_string();
-            *branches = vec!["main".into()];
-            *name_pristine = false;
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.selected_issue = Some(issue(1, "Old issue"));
+            state.prompt = "Work on GitLab issue #1: Old issue".to_string();
+            state.branch_name = "z-0409-1-old-issue".to_string();
+            state.branches = vec!["main".into()];
+            state.name_pristine = false;
         }
 
         let current_repo = repo(&app, 0);
@@ -3898,34 +3159,24 @@ mod tests {
             result: Err("glab not found".to_string()),
         });
 
-        if let Mode::NewAgent {
-            issues,
-            selected_issue,
-            prompt,
-            branch_name,
-            name_pristine,
-            ..
-        } = &app.mode
-        {
-            assert!(matches!(issues, RemoteList::Failed(_)));
-            assert!(selected_issue.is_none());
-            assert_eq!(prompt, "");
-            assert_eq!(
-                branch_name,
-                &generate_branch_name(&["main".into()], &chrono_free_date_str())
-            );
-            assert!(*name_pristine);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert!(matches!(&state.issues, RemoteList::Failed(_)));
+        assert!(state.selected_issue.is_none());
+        assert_eq!(state.prompt, "");
+        assert_eq!(
+            state.branch_name,
+            generate_branch_name(&["main".into()], &chrono_free_date_str())
+        );
+        assert!(state.name_pristine);
     }
 
     #[test]
     fn gitlab_issue_failure_clears_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { source, prompt, .. } = &mut app.mode {
-            *source = NewAgentSource::Issue;
-            *prompt = "old prompt".to_string();
+        {
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.prompt = "old prompt".to_string();
         }
 
         let current_repo = repo(&app, 0);
@@ -3934,28 +3185,18 @@ mod tests {
             result: Err("glab not found".to_string()),
         });
 
-        if let Mode::NewAgent { prompt, .. } = &app.mode {
-            assert_eq!(prompt, "");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        assert_eq!(new_agent_state(&app).prompt, "");
     }
 
     #[test]
     fn gitlab_mr_empty_clears_generated_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            mrs,
-            selected_mr,
-            prompt,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Mr;
-            *mrs = RemoteList::Loaded(vec![mr(1, "Old MR", "old-mr")]);
-            *selected_mr = Some(mr(1, "Old MR", "old-mr"));
-            *prompt = "Review GitLab MR !1: Old MR".to_string();
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Mr;
+            state.mrs = RemoteList::Loaded(vec![mr(1, "Old MR", "old-mr")]);
+            state.selected_mr = Some(mr(1, "Old MR", "old-mr"));
+            state.prompt = "Review GitLab MR !1: Old MR".to_string();
         }
 
         let current_repo = repo(&app, 0);
@@ -3964,34 +3205,20 @@ mod tests {
             result: Ok(Vec::new()),
         });
 
-        if let Mode::NewAgent {
-            mrs,
-            selected_mr,
-            prompt,
-            ..
-        } = &app.mode
-        {
-            assert!(matches!(mrs, RemoteList::Loaded(v) if v.is_empty()));
-            assert!(selected_mr.is_none());
-            assert_eq!(prompt, "");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert!(matches!(&state.mrs, RemoteList::Loaded(v) if v.is_empty()));
+        assert!(state.selected_mr.is_none());
+        assert_eq!(state.prompt, "");
     }
 
     #[test]
     fn gitlab_mr_failure_clears_generated_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            selected_mr,
-            prompt,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Mr;
-            *selected_mr = Some(mr(1, "Old MR", "old-mr"));
-            *prompt = "Review GitLab MR !1: Old MR".to_string();
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Mr;
+            state.selected_mr = Some(mr(1, "Old MR", "old-mr"));
+            state.prompt = "Review GitLab MR !1: Old MR".to_string();
         }
 
         let current_repo = repo(&app, 0);
@@ -4000,34 +3227,20 @@ mod tests {
             result: Err("glab not found".to_string()),
         });
 
-        if let Mode::NewAgent {
-            mrs,
-            selected_mr,
-            prompt,
-            ..
-        } = &app.mode
-        {
-            assert!(matches!(mrs, RemoteList::Failed(_)));
-            assert!(selected_mr.is_none());
-            assert_eq!(prompt, "");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert!(matches!(&state.mrs, RemoteList::Failed(_)));
+        assert!(state.selected_mr.is_none());
+        assert_eq!(state.prompt, "");
     }
 
     #[test]
     fn loaded_issue_replaces_edited_prompt() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            focus,
-            issues,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Issue;
-            *focus = NewAgentFocus::Prompt;
-            *issues = RemoteList::Loading;
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.focus = NewAgentFocus::Prompt;
+            state.issues = RemoteList::Loading;
         }
         app.update(Action::PromptEdited(Ok("my".to_string())));
 
@@ -4037,11 +3250,11 @@ mod tests {
             result: Ok(vec![issue(1102, "Detect agents remotely")]),
         });
 
-        if let Mode::NewAgent { prompt, .. } = &app.mode {
-            assert!(prompt.starts_with("Work on GitLab issue #1102"));
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        assert!(
+            new_agent_state(&app)
+                .prompt
+                .starts_with("Work on GitLab issue #1102")
+        );
     }
 
     #[test]
@@ -4072,9 +3285,10 @@ mod tests {
     #[test]
     fn focus_cycles_through_issue_source_states() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { source, focus, .. } = &mut app.mode {
-            *source = NewAgentSource::Issue;
-            *focus = NewAgentFocus::Repo;
+        {
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.focus = NewAgentFocus::Repo;
         }
 
         let expected = vec![
@@ -4087,20 +3301,17 @@ mod tests {
         ];
         for exp in expected {
             app.update(Action::FocusNext);
-            if let Mode::NewAgent { focus, .. } = &app.mode {
-                assert_eq!(*focus, exp);
-            } else {
-                panic!("expected NewAgent mode");
-            }
+            assert_eq!(new_agent_state(&app).focus, exp);
         }
     }
 
     #[test]
     fn focus_cycles_through_mr_source_states() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { source, focus, .. } = &mut app.mode {
-            *source = NewAgentSource::Mr;
-            *focus = NewAgentFocus::Repo;
+        {
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Mr;
+            state.focus = NewAgentFocus::Repo;
         }
 
         let expected = vec![
@@ -4113,40 +3324,26 @@ mod tests {
         ];
         for exp in expected {
             app.update(Action::FocusNext);
-            if let Mode::NewAgent { focus, .. } = &app.mode {
-                assert_eq!(*focus, exp);
-            } else {
-                panic!("expected NewAgent mode");
-            }
+            assert_eq!(new_agent_state(&app).focus, exp);
         }
     }
 
     #[test]
     fn typing_in_search_filters_issues_and_selects_first_match() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            focus,
-            source_index,
-            issues,
-            selected_issue,
-            branches,
-            branch_name,
-            name_pristine,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Issue;
-            *focus = NewAgentFocus::Search;
-            *source_index = 0;
-            *issues = RemoteList::Loaded(vec![
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.focus = NewAgentFocus::Search;
+            state.source_index = 0;
+            state.issues = RemoteList::Loaded(vec![
                 issue(10, "Refresh dashboard"),
                 issue(25, "Fix auth callback"),
             ]);
-            *selected_issue = Some(issue(10, "Refresh dashboard"));
-            *branches = vec!["main".into()];
-            *branch_name = "old-branch".into();
-            *name_pristine = false;
+            state.selected_issue = Some(issue(10, "Refresh dashboard"));
+            state.branches = vec!["main".into()];
+            state.branch_name = "old-branch".into();
+            state.name_pristine = false;
         }
 
         app.update(Action::TypeChar('a'));
@@ -4154,225 +3351,128 @@ mod tests {
         app.update(Action::TypeChar('t'));
         app.update(Action::TypeChar('h'));
 
-        if let Mode::NewAgent {
-            source_query,
-            source_index,
-            selected_issue,
-            prompt,
-            branch_name,
-            name_pristine,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(source_query, "auth");
-            assert_eq!(*source_index, 1);
-            assert_eq!(selected_issue.as_ref().unwrap().iid, 25);
-            assert!(prompt.starts_with("Work on GitLab issue #25"));
-            assert!(branch_name.contains("fix-auth-callback"));
-            assert!(*name_pristine);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.source_query, "auth");
+        assert_eq!(state.source_index, 1);
+        assert_eq!(state.selected_issue.as_ref().unwrap().iid, 25);
+        assert!(state.prompt.starts_with("Work on GitLab issue #25"));
+        assert!(state.branch_name.contains("fix-auth-callback"));
+        assert!(state.name_pristine);
     }
 
     #[test]
     fn search_backspace_reselects_first_issue_match() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            focus,
-            source_query,
-            source_index,
-            issues,
-            selected_issue,
-            branches,
-            branch_name,
-            name_pristine,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Issue;
-            *focus = NewAgentFocus::Search;
-            source_query.push_str("authx");
-            *source_index = 0;
-            *issues = RemoteList::Loaded(vec![
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.focus = NewAgentFocus::Search;
+            state.source_query.push_str("authx");
+            state.source_index = 0;
+            state.issues = RemoteList::Loaded(vec![
                 issue(10, "Refresh dashboard"),
                 issue(25, "Fix auth callback"),
             ]);
-            *selected_issue = Some(issue(10, "Refresh dashboard"));
-            *branches = vec!["main".into()];
-            *branch_name = "old-branch".into();
-            *name_pristine = false;
+            state.selected_issue = Some(issue(10, "Refresh dashboard"));
+            state.branches = vec!["main".into()];
+            state.branch_name = "old-branch".into();
+            state.name_pristine = false;
         }
 
         app.update(Action::TypeBackspace);
 
-        if let Mode::NewAgent {
-            source_query,
-            source_index,
-            selected_issue,
-            prompt,
-            branch_name,
-            name_pristine,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(source_query, "auth");
-            assert_eq!(*source_index, 1);
-            assert_eq!(selected_issue.as_ref().unwrap().iid, 25);
-            assert!(prompt.starts_with("Work on GitLab issue #25"));
-            assert!(branch_name.contains("fix-auth-callback"));
-            assert!(*name_pristine);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.source_query, "auth");
+        assert_eq!(state.source_index, 1);
+        assert_eq!(state.selected_issue.as_ref().unwrap().iid, 25);
+        assert!(state.prompt.starts_with("Work on GitLab issue #25"));
+        assert!(state.branch_name.contains("fix-auth-callback"));
+        assert!(state.name_pristine);
     }
 
     #[test]
     fn search_with_no_matches_keeps_current_issue_selection() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            focus,
-            source_index,
-            issues,
-            selected_issue,
-            prompt,
-            branches,
-            branch_name,
-            name_pristine,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Issue;
-            *focus = NewAgentFocus::Search;
-            *source_index = 1;
-            *issues = RemoteList::Loaded(vec![
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.focus = NewAgentFocus::Search;
+            state.source_index = 1;
+            state.issues = RemoteList::Loaded(vec![
                 issue(10, "Refresh dashboard"),
                 issue(25, "Fix auth callback"),
             ]);
-            *selected_issue = Some(issue(25, "Fix auth callback"));
-            *prompt = "Work on GitLab issue #25: Fix auth callback".into();
-            *branches = vec!["main".into()];
-            *branch_name = "z-0409-1-fix-auth-callback".into();
-            *name_pristine = true;
+            state.selected_issue = Some(issue(25, "Fix auth callback"));
+            state.prompt = "Work on GitLab issue #25: Fix auth callback".into();
+            state.branches = vec!["main".into()];
+            state.branch_name = "z-0409-1-fix-auth-callback".into();
+            state.name_pristine = true;
         }
 
         app.update(Action::TypeChar('z'));
 
-        if let Mode::NewAgent {
-            source_query,
-            source_index,
-            selected_issue,
-            prompt,
-            branch_name,
-            name_pristine,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(source_query, "z");
-            assert_eq!(*source_index, 1);
-            assert_eq!(selected_issue.as_ref().unwrap().iid, 25);
-            assert_eq!(prompt, "Work on GitLab issue #25: Fix auth callback");
-            assert_eq!(branch_name, "z-0409-1-fix-auth-callback");
-            assert!(*name_pristine);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.source_query, "z");
+        assert_eq!(state.source_index, 1);
+        assert_eq!(state.selected_issue.as_ref().unwrap().iid, 25);
+        assert_eq!(state.prompt, "Work on GitLab issue #25: Fix auth callback");
+        assert_eq!(state.branch_name, "z-0409-1-fix-auth-callback");
+        assert!(state.name_pristine);
     }
 
     #[test]
     fn source_list_picker_next_selects_next_filtered_issue() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            focus,
-            source_query,
-            source_index,
-            issues,
-            selected_issue,
-            branches,
-            branch_name,
-            name_pristine,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Issue;
-            *focus = NewAgentFocus::SourceList;
-            source_query.push_str("auth");
-            *source_index = 0;
-            *issues = RemoteList::Loaded(vec![
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.focus = NewAgentFocus::SourceList;
+            state.source_query.push_str("auth");
+            state.source_index = 0;
+            state.issues = RemoteList::Loaded(vec![
                 issue(10, "Auth API"),
                 issue(11, "Docs refresh"),
                 issue(12, "Auth UI"),
             ]);
-            *selected_issue = Some(issue(10, "Auth API"));
-            *branches = vec!["main".into()];
-            *branch_name = "old-branch".into();
-            *name_pristine = false;
+            state.selected_issue = Some(issue(10, "Auth API"));
+            state.branches = vec!["main".into()];
+            state.branch_name = "old-branch".into();
+            state.name_pristine = false;
         }
 
         app.update(Action::PickerNext);
 
-        if let Mode::NewAgent {
-            source_index,
-            selected_issue,
-            prompt,
-            branch_name,
-            name_pristine,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(*source_index, 2);
-            assert_eq!(selected_issue.as_ref().unwrap().iid, 12);
-            assert!(prompt.starts_with("Work on GitLab issue #12"));
-            assert!(branch_name.contains("auth-ui"));
-            assert!(*name_pristine);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.source_index, 2);
+        assert_eq!(state.selected_issue.as_ref().unwrap().iid, 12);
+        assert!(state.prompt.starts_with("Work on GitLab issue #12"));
+        assert!(state.branch_name.contains("auth-ui"));
+        assert!(state.name_pristine);
     }
 
     #[test]
     fn source_list_picker_next_selects_next_filtered_mr() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent {
-            source,
-            focus,
-            source_query,
-            source_index,
-            mrs,
-            selected_mr,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Mr;
-            *focus = NewAgentFocus::SourceList;
-            source_query.push_str("auth");
-            *source_index = 0;
-            *mrs = RemoteList::Loaded(vec![
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Mr;
+            state.focus = NewAgentFocus::SourceList;
+            state.source_query.push_str("auth");
+            state.source_index = 0;
+            state.mrs = RemoteList::Loaded(vec![
                 mr(30, "Auth API", "fix/auth-api"),
                 mr(31, "Docs refresh", "docs-refresh"),
                 mr(32, "Auth UI", "fix/auth-ui"),
             ]);
-            *selected_mr = Some(mr(30, "Auth API", "fix/auth-api"));
+            state.selected_mr = Some(mr(30, "Auth API", "fix/auth-api"));
         }
 
         app.update(Action::PickerNext);
 
-        if let Mode::NewAgent {
-            source_index,
-            selected_mr,
-            prompt,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(*source_index, 2);
-            assert_eq!(selected_mr.as_ref().unwrap().iid, 32);
-            assert!(prompt.starts_with("Review GitLab MR !32"));
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.source_index, 2);
+        assert_eq!(state.selected_mr.as_ref().unwrap().iid, 32);
+        assert!(state.prompt.starts_with("Review GitLab MR !32"));
     }
 
     fn make_key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
@@ -4607,20 +3707,24 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         // Already at BranchList (closest equivalent to old Base)
-        if let Mode::NewAgent { focus, .. } = &app.mode {
+        if let Mode::NewAgent(state) = &app.mode {
+            let focus = &state.focus;
             assert_eq!(*focus, NewAgentFocus::BranchList);
         }
         // Cycle base forward
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { base_index, .. } = &app.mode {
+        if let Mode::NewAgent(state) = &app.mode {
+            let base_index = &state.base_index;
             assert_eq!(*base_index, 1);
         }
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { base_index, .. } = &app.mode {
+        if let Mode::NewAgent(state) = &app.mode {
+            let base_index = &state.base_index;
             assert_eq!(*base_index, 2);
         }
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { base_index, .. } = &app.mode {
+        if let Mode::NewAgent(state) = &app.mode {
+            let base_index = &state.base_index;
             assert_eq!(*base_index, 0);
         }
     }
@@ -4677,22 +3781,13 @@ mod tests {
             repo: current_repo,
             branches: vec!["develop".into(), "main".into(), existing_branch.clone()],
         });
-        if let Mode::NewAgent {
-            branches,
-            base_index,
-            branch_name,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(
-                branches,
-                &vec!["develop".to_string(), "main".to_string(), existing_branch]
-            );
-            assert_eq!(*base_index, 1); // "main" is at index 1
-            assert_eq!(*branch_name, expected_branch); // existing branch exists, so next is 2
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(
+            state.branches,
+            vec!["develop".to_string(), "main".to_string(), existing_branch]
+        );
+        assert_eq!(state.base_index, 1); // "main" is at index 1
+        assert_eq!(state.branch_name, expected_branch); // existing branch exists, so next is 2
     }
 
     #[test]
@@ -4717,19 +3812,10 @@ mod tests {
             branches: vec!["alpha-main".into(), "alpha-feature".into()],
         });
 
-        if let Mode::NewAgent {
-            branches,
-            existing_branches,
-            branch_name,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(branches, &vec!["beta-main".to_string()]);
-            assert_eq!(existing_branches, &vec!["beta-main".to_string()]);
-            assert_eq!(branch_name, "keep-beta-branch");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.branches, vec!["beta-main".to_string()]);
+        assert_eq!(state.existing_branches, vec!["beta-main".to_string()]);
+        assert_eq!(state.branch_name, "keep-beta-branch");
     }
 
     #[test]
@@ -4754,21 +3840,14 @@ mod tests {
             branches: vec!["develop".into(), "main".into()],
         });
 
-        if let Mode::NewAgent {
-            branches,
-            base_index,
-            branch_name,
-            name_pristine,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(branches, &vec!["develop".to_string(), "main".to_string()]);
-            assert_eq!(*base_index, 1);
-            assert_eq!(branch_name, "my-custom-branch");
-            assert!(!name_pristine);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(
+            state.branches,
+            vec!["develop".to_string(), "main".to_string()]
+        );
+        assert_eq!(state.base_index, 1);
+        assert_eq!(state.branch_name, "my-custom-branch");
+        assert!(!state.name_pristine);
     }
 
     #[test]
@@ -4797,11 +3876,7 @@ mod tests {
         ];
         for exp in expected {
             app.update(Action::FocusNext);
-            if let Mode::NewAgent { focus, .. } = &app.mode {
-                assert_eq!(*focus, exp);
-            } else {
-                panic!("expected NewAgent mode");
-            }
+            assert_eq!(new_agent_state(&app).focus, exp);
         }
     }
 
@@ -4821,37 +3896,24 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { repo_index, .. } = &app.mode {
-            assert_eq!(*repo_index, 1);
-        }
+        assert_eq!(new_agent_state(&app).repo_index, 1);
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { repo_index, .. } = &app.mode {
-            assert_eq!(*repo_index, 2);
-        }
+        assert_eq!(new_agent_state(&app).repo_index, 2);
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { repo_index, .. } = &app.mode {
-            assert_eq!(*repo_index, 0);
-        }
+        assert_eq!(new_agent_state(&app).repo_index, 0);
     }
 
     #[test]
     fn repo_cycling_issue_source_reloads_branches_and_issues_for_new_repo() {
         let mut app = test_app_with_repos(&["~/src/alpha", "~/src/beta"]);
         app.update(Action::StartNewAgent);
-        if let Mode::NewAgent {
-            focus,
-            source_query,
-            source_index,
-            issues,
-            selected_issue,
-            ..
-        } = &mut app.mode
         {
-            *focus = NewAgentFocus::Repo;
-            source_query.push_str("auth");
-            *source_index = 2;
-            *issues = RemoteList::Loaded(vec![]);
-            *selected_issue = Some(GitlabIssue {
+            let state = new_agent_state_mut(&mut app);
+            state.focus = NewAgentFocus::Repo;
+            state.source_query.push_str("auth");
+            state.source_index = 2;
+            state.issues = RemoteList::Loaded(vec![]);
+            state.selected_issue = Some(GitlabIssue {
                 iid: 42,
                 title: "Fix auth".into(),
                 description: None,
@@ -4862,23 +3924,12 @@ mod tests {
         let repos = app.config.resolved_repos();
         let cmds = app.update(Action::PickerNext);
 
-        if let Mode::NewAgent {
-            repo_index,
-            source_query,
-            source_index,
-            issues,
-            selected_issue,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(*repo_index, 1);
-            assert_eq!(source_query, "");
-            assert_eq!(*source_index, 0);
-            assert!(matches!(issues, RemoteList::Loading));
-            assert!(selected_issue.is_none());
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.repo_index, 1);
+        assert_eq!(state.source_query, "");
+        assert_eq!(state.source_index, 0);
+        assert!(matches!(&state.issues, RemoteList::Loading));
+        assert!(state.selected_issue.is_none());
         assert!(
             cmds.iter()
                 .any(|c| matches!(c, Command::LoadBranches(repo) if repo == &repos[1]))
@@ -4894,22 +3945,14 @@ mod tests {
     fn repo_cycling_mr_source_reloads_branches_and_mrs_for_new_repo() {
         let mut app = test_app_with_repos(&["~/src/alpha", "~/src/beta"]);
         app.update(Action::StartNewAgent);
-        if let Mode::NewAgent {
-            focus,
-            source,
-            source_query,
-            source_index,
-            mrs,
-            selected_mr,
-            ..
-        } = &mut app.mode
         {
-            *focus = NewAgentFocus::Repo;
-            *source = NewAgentSource::Mr;
-            source_query.push_str("review");
-            *source_index = 3;
-            *mrs = RemoteList::Loaded(vec![]);
-            *selected_mr = Some(GitlabMergeRequest {
+            let state = new_agent_state_mut(&mut app);
+            state.focus = NewAgentFocus::Repo;
+            state.source = NewAgentSource::Mr;
+            state.source_query.push_str("review");
+            state.source_index = 3;
+            state.mrs = RemoteList::Loaded(vec![]);
+            state.selected_mr = Some(GitlabMergeRequest {
                 iid: 7,
                 title: "Review auth".into(),
                 description: None,
@@ -4922,23 +3965,12 @@ mod tests {
         let repos = app.config.resolved_repos();
         let cmds = app.update(Action::PickerPrev);
 
-        if let Mode::NewAgent {
-            repo_index,
-            source_query,
-            source_index,
-            mrs,
-            selected_mr,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(*repo_index, 1);
-            assert_eq!(source_query, "");
-            assert_eq!(*source_index, 0);
-            assert!(matches!(mrs, RemoteList::Loading));
-            assert!(selected_mr.is_none());
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.repo_index, 1);
+        assert_eq!(state.source_query, "");
+        assert_eq!(state.source_index, 0);
+        assert!(matches!(&state.mrs, RemoteList::Loading));
+        assert!(state.selected_mr.is_none());
         assert!(
             cmds.iter()
                 .any(|c| matches!(c, Command::LoadBranches(repo) if repo == &repos[1]))
@@ -4993,17 +4025,9 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::TypeChar('f'));
-        if let Mode::NewAgent {
-            branch_name,
-            name_pristine,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(branch_name, "f");
-            assert!(!name_pristine);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.branch_name, "f");
+        assert!(!state.name_pristine);
     }
 
     #[test]
@@ -5022,17 +4046,9 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::TypeBackspace);
-        if let Mode::NewAgent {
-            branch_name,
-            name_pristine,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(branch_name, "");
-            assert!(!name_pristine);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.branch_name, "");
+        assert!(!state.name_pristine);
     }
 
     #[test]
@@ -5052,23 +4068,14 @@ mod tests {
         };
         // Tab away from empty Name field
         app.update(Action::FocusNext);
-        if let Mode::NewAgent {
-            branch_name,
-            name_pristine,
-            focus,
-            ..
-        } = &app.mode
-        {
-            assert!(
-                !branch_name.is_empty(),
-                "should have snapped back to generated name"
-            );
-            assert!(branch_name.starts_with("z-"));
-            assert!(*name_pristine);
-            assert_eq!(*focus, NewAgentFocus::Prompt);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert!(
+            !state.branch_name.is_empty(),
+            "should have snapped back to generated name"
+        );
+        assert!(state.branch_name.starts_with("z-"));
+        assert!(state.name_pristine);
+        assert_eq!(state.focus, NewAgentFocus::Prompt);
     }
 
     #[test]
@@ -5087,11 +4094,7 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::TypeChar('!'));
-        if let Mode::NewAgent { branch_name, .. } = &app.mode {
-            assert_eq!(branch_name, "my-branch!");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        assert_eq!(new_agent_state(&app).branch_name, "my-branch!");
     }
 
     // Command-pattern tests
@@ -5171,6 +4174,45 @@ mod tests {
     }
 
     #[test]
+    fn tick_does_not_enqueue_duplicate_capture_while_pending() {
+        let mut app = test_app();
+        let agent = mock_agent("a");
+        let session = agent.session_name.clone();
+        app.agents = vec![agent];
+        app.spinner_frame = 4;
+
+        let cmds = app.update(Action::Tick);
+
+        assert!(
+            cmds.iter()
+                .any(|cmd| matches!(cmd, Command::CaptureActivity { session_name } if session_name == &session))
+        );
+        assert!(app.capture_pending.contains(&session));
+
+        app.spinner_frame = 9;
+        let cmds = app.update(Action::Tick);
+
+        assert!(
+            !cmds
+                .iter()
+                .any(|cmd| matches!(cmd, Command::CaptureActivity { .. }))
+        );
+    }
+
+    #[test]
+    fn activity_capture_completion_clears_backpressure() {
+        let mut app = test_app();
+        let session = "z-myapp-a".to_string();
+        app.capture_pending.insert(session.clone());
+
+        app.update(Action::ActivityCaptureFailed {
+            session_name: session.clone(),
+        });
+
+        assert!(!app.capture_pending.contains(&session));
+    }
+
+    #[test]
     fn focus_cycles_new_branch_mode_states() {
         let mut app = test_app();
         app.mode = branch_new_agent_mode! {
@@ -5196,11 +4238,7 @@ mod tests {
         ];
         for exp in expected {
             app.update(Action::FocusNext);
-            if let Mode::NewAgent { focus, .. } = &app.mode {
-                assert_eq!(*focus, exp);
-            } else {
-                panic!("expected NewAgent mode");
-            }
+            assert_eq!(new_agent_state(&app).focus, exp);
         }
     }
 
@@ -5229,11 +4267,7 @@ mod tests {
         ];
         for exp in expected {
             app.update(Action::FocusNext);
-            if let Mode::NewAgent { focus, .. } = &app.mode {
-                assert_eq!(*focus, exp);
-            } else {
-                panic!("expected NewAgent mode");
-            }
+            assert_eq!(new_agent_state(&app).focus, exp);
         }
     }
 
@@ -5253,11 +4287,7 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::FocusPrev);
-        if let Mode::NewAgent { focus, .. } = &app.mode {
-            assert_eq!(*focus, NewAgentFocus::BranchList); // skips Name
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        assert_eq!(new_agent_state(&app).focus, NewAgentFocus::BranchList); // skips Name
     }
 
     #[test]
@@ -5276,17 +4306,9 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::PickerNext);
-        if let Mode::NewAgent {
-            branch_mode,
-            base_index,
-            ..
-        } = &app.mode
-        {
-            assert_eq!(*branch_mode, BranchMode::Existing);
-            assert_eq!(*base_index, 0); // reset on toggle
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.branch_mode, BranchMode::Existing);
+        assert_eq!(state.base_index, 0); // reset on toggle
     }
 
     #[test]
@@ -5305,17 +4327,11 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { base_index, .. } = &app.mode {
-            assert_eq!(*base_index, 1);
-        }
+        assert_eq!(new_agent_state(&app).base_index, 1);
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { base_index, .. } = &app.mode {
-            assert_eq!(*base_index, 2);
-        }
+        assert_eq!(new_agent_state(&app).base_index, 2);
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { base_index, .. } = &app.mode {
-            assert_eq!(*base_index, 0); // wraps
-        }
+        assert_eq!(new_agent_state(&app).base_index, 0); // wraps
     }
 
     #[test]
@@ -5334,9 +4350,7 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { base_index, .. } = &app.mode {
-            assert_eq!(*base_index, 0); // wraps at 1 (only 1 existing branch)
-        }
+        assert_eq!(new_agent_state(&app).base_index, 0); // wraps at 1 (only 1 existing branch)
     }
 
     #[test]
@@ -5355,9 +4369,7 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { repo_index, .. } = &app.mode {
-            assert_eq!(*repo_index, 1);
-        }
+        assert_eq!(new_agent_state(&app).repo_index, 1);
     }
 
     #[test]
@@ -5437,18 +4449,12 @@ mod tests {
                 "feature-new".into(),
             ],
         });
-        if let Mode::NewAgent {
-            existing_branches, ..
-        } = &app.mode
-        {
-            // fix-auth has a worktree (in agents), so excluded
-            assert!(existing_branches.contains(&"main".to_string()));
-            assert!(existing_branches.contains(&"develop".to_string()));
-            assert!(existing_branches.contains(&"feature-new".to_string()));
-            assert!(!existing_branches.contains(&"fix-auth".to_string()));
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let existing_branches = &new_agent_state(&app).existing_branches;
+        // fix-auth has a worktree (in agents), so excluded
+        assert!(existing_branches.contains(&"main".to_string()));
+        assert!(existing_branches.contains(&"develop".to_string()));
+        assert!(existing_branches.contains(&"feature-new".to_string()));
+        assert!(!existing_branches.contains(&"fix-auth".to_string()));
     }
 
     #[test]
@@ -5475,16 +4481,10 @@ mod tests {
             repo: current_repo,
             branches: vec!["main".into(), "fix-auth".into()],
         });
-        if let Mode::NewAgent {
-            existing_branches, ..
-        } = &app.mode
-        {
-            // fix-auth is on a different repo, so it should NOT be excluded
-            assert!(existing_branches.contains(&"fix-auth".to_string()));
-            assert_eq!(existing_branches.len(), 2);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let existing_branches = &new_agent_state(&app).existing_branches;
+        // fix-auth is on a different repo, so it should NOT be excluded
+        assert!(existing_branches.contains(&"fix-auth".to_string()));
+        assert_eq!(existing_branches.len(), 2);
     }
 
     #[test]
@@ -5541,14 +4541,14 @@ mod tests {
             agent_name: "codex".to_string(),
         };
         let cmds = app.update(Action::PickerConfirm);
-        assert!(matches!(app.mode, Mode::NewAgent { .. })); // stays in mode
+        assert!(matches!(app.mode, Mode::NewAgent(_))); // stays in mode
         assert!(cmds.is_empty());
     }
 
     #[test]
     fn picker_confirm_issue_creates_new_branch_command() {
         let mut app = test_app();
-        app.mode = Mode::NewAgent {
+        app.mode = branch_new_agent_mode! {
             repo_index: 0,
             source: NewAgentSource::Issue,
             source_query: String::new(),
@@ -5592,7 +4592,7 @@ mod tests {
     #[test]
     fn picker_confirm_issue_rejects_hidden_filtered_selection() {
         let mut app = test_app();
-        app.mode = Mode::NewAgent {
+        app.mode = branch_new_agent_mode! {
             repo_index: 0,
             source: NewAgentSource::Issue,
             source_query: "missing".into(),
@@ -5615,7 +4615,7 @@ mod tests {
         let cmds = app.update(Action::PickerConfirm);
 
         assert!(cmds.is_empty());
-        assert!(matches!(app.mode, Mode::NewAgent { .. }));
+        assert!(matches!(app.mode, Mode::NewAgent(_)));
         assert_eq!(
             app.status_message.as_deref(),
             Some("No matching issue selected")
@@ -5625,7 +4625,7 @@ mod tests {
     #[test]
     fn picker_confirm_issue_rejects_stale_selection_while_loading() {
         let mut app = test_app();
-        app.mode = Mode::NewAgent {
+        app.mode = branch_new_agent_mode! {
             repo_index: 0,
             source: NewAgentSource::Issue,
             source_query: String::new(),
@@ -5648,7 +4648,7 @@ mod tests {
         let cmds = app.update(Action::PickerConfirm);
 
         assert!(cmds.is_empty());
-        assert!(matches!(app.mode, Mode::NewAgent { .. }));
+        assert!(matches!(app.mode, Mode::NewAgent(_)));
         assert_eq!(
             app.status_message.as_deref(),
             Some("No matching issue selected")
@@ -5658,7 +4658,7 @@ mod tests {
     #[test]
     fn picker_confirm_mr_prepares_mr_branch_command() {
         let mut app = test_app();
-        app.mode = Mode::NewAgent {
+        app.mode = branch_new_agent_mode! {
             repo_index: 0,
             source: NewAgentSource::Mr,
             source_query: String::new(),
@@ -5708,7 +4708,7 @@ mod tests {
     #[test]
     fn picker_confirm_mr_rejects_hidden_filtered_selection() {
         let mut app = test_app();
-        app.mode = Mode::NewAgent {
+        app.mode = branch_new_agent_mode! {
             repo_index: 0,
             source: NewAgentSource::Mr,
             source_query: "missing".into(),
@@ -5739,7 +4739,7 @@ mod tests {
         let cmds = app.update(Action::PickerConfirm);
 
         assert!(cmds.is_empty());
-        assert!(matches!(app.mode, Mode::NewAgent { .. }));
+        assert!(matches!(app.mode, Mode::NewAgent(_)));
         assert_eq!(
             app.status_message.as_deref(),
             Some("No matching merge request selected")
@@ -5749,7 +4749,7 @@ mod tests {
     #[test]
     fn picker_confirm_mr_rejects_stale_selection_while_loading() {
         let mut app = test_app();
-        app.mode = Mode::NewAgent {
+        app.mode = branch_new_agent_mode! {
             repo_index: 0,
             source: NewAgentSource::Mr,
             source_query: String::new(),
@@ -5776,7 +4776,7 @@ mod tests {
         let cmds = app.update(Action::PickerConfirm);
 
         assert!(cmds.is_empty());
-        assert!(matches!(app.mode, Mode::NewAgent { .. }));
+        assert!(matches!(app.mode, Mode::NewAgent(_)));
         assert_eq!(
             app.status_message.as_deref(),
             Some("No matching merge request selected")
@@ -5786,7 +4786,7 @@ mod tests {
     #[test]
     fn picker_confirm_issue_without_selection_sets_status() {
         let mut app = test_app();
-        app.mode = Mode::NewAgent {
+        app.mode = branch_new_agent_mode! {
             repo_index: 0,
             source: NewAgentSource::Issue,
             source_query: String::new(),
@@ -5809,14 +4809,14 @@ mod tests {
         let cmds = app.update(Action::PickerConfirm);
 
         assert!(cmds.is_empty());
-        assert!(matches!(app.mode, Mode::NewAgent { .. }));
+        assert!(matches!(app.mode, Mode::NewAgent(_)));
         assert_eq!(app.status_message.as_deref(), Some("No issue selected"));
     }
 
     #[test]
     fn picker_confirm_mr_without_selection_sets_status() {
         let mut app = test_app();
-        app.mode = Mode::NewAgent {
+        app.mode = branch_new_agent_mode! {
             repo_index: 0,
             source: NewAgentSource::Mr,
             source_query: String::new(),
@@ -5839,7 +4839,7 @@ mod tests {
         let cmds = app.update(Action::PickerConfirm);
 
         assert!(cmds.is_empty());
-        assert!(matches!(app.mode, Mode::NewAgent { .. }));
+        assert!(matches!(app.mode, Mode::NewAgent(_)));
         assert_eq!(
             app.status_message.as_deref(),
             Some("No merge request selected")
@@ -5957,15 +4957,9 @@ mod tests {
     fn start_new_agent_begins_at_repo_focus() {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
-        if let Mode::NewAgent {
-            focus, branch_mode, ..
-        } = &app.mode
-        {
-            assert_eq!(*focus, NewAgentFocus::Repo);
-            assert_eq!(*branch_mode, BranchMode::New);
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        let state = new_agent_state(&app);
+        assert_eq!(state.focus, NewAgentFocus::Repo);
+        assert_eq!(state.branch_mode, BranchMode::New);
     }
 
     #[test]
@@ -5986,17 +4980,9 @@ mod tests {
             agent_name: "claude".to_string(),
         };
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { agent_name, .. } = &app.mode {
-            assert_eq!(agent_name, "codex");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        assert_eq!(new_agent_state(&app).agent_name, "codex");
         app.update(Action::PickerNext);
-        if let Mode::NewAgent { agent_name, .. } = &app.mode {
-            assert_eq!(agent_name, "claude");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        assert_eq!(new_agent_state(&app).agent_name, "claude");
     }
 
     #[test]
@@ -6016,11 +5002,7 @@ mod tests {
         };
         // prev wraps backwards: claude -> codex
         app.update(Action::PickerPrev);
-        if let Mode::NewAgent { agent_name, .. } = &app.mode {
-            assert_eq!(agent_name, "codex");
-        } else {
-            panic!("expected NewAgent mode");
-        }
+        assert_eq!(new_agent_state(&app).agent_name, "codex");
     }
 
     #[test]
@@ -6549,7 +5531,8 @@ mod tests {
     #[test]
     fn newagent_branchlist_k_moves_up() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+        if let Mode::NewAgent(state) = &mut app.mode {
+            let focus = &mut state.focus;
             *focus = NewAgentFocus::BranchList;
         }
         let action = app.handle_key(make_key(KeyCode::Char('k')));
@@ -6559,7 +5542,8 @@ mod tests {
     #[test]
     fn newagent_branchlist_j_moves_down() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+        if let Mode::NewAgent(state) = &mut app.mode {
+            let focus = &mut state.focus;
             *focus = NewAgentFocus::BranchList;
         }
         let action = app.handle_key(make_key(KeyCode::Char('j')));
@@ -6569,7 +5553,8 @@ mod tests {
     #[test]
     fn newagent_sourcelist_j_and_down_move_down() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+        if let Mode::NewAgent(state) = &mut app.mode {
+            let focus = &mut state.focus;
             *focus = NewAgentFocus::SourceList;
         }
 
@@ -6586,7 +5571,8 @@ mod tests {
     #[test]
     fn newagent_sourcelist_k_and_up_move_up() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+        if let Mode::NewAgent(state) = &mut app.mode {
+            let focus = &mut state.focus;
             *focus = NewAgentFocus::SourceList;
         }
 
@@ -6603,7 +5589,8 @@ mod tests {
     #[test]
     fn newagent_search_backspace_and_chars_are_text_input() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+        if let Mode::NewAgent(state) = &mut app.mode {
+            let focus = &mut state.focus;
             *focus = NewAgentFocus::Search;
         }
 
@@ -6620,7 +5607,8 @@ mod tests {
     #[test]
     fn newagent_search_up_down_do_not_move_source_list() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+        if let Mode::NewAgent(state) = &mut app.mode {
+            let focus = &mut state.focus;
             *focus = NewAgentFocus::Search;
         }
 
@@ -6647,7 +5635,8 @@ mod tests {
     #[test]
     fn newagent_branchlist_q_does_not_cancel() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+        if let Mode::NewAgent(state) = &mut app.mode {
+            let focus = &mut state.focus;
             *focus = NewAgentFocus::BranchList;
         }
         let action = app.handle_key(make_key(KeyCode::Char('q')));
@@ -6677,7 +5666,8 @@ mod tests {
     #[test]
     fn newagent_name_q_still_types() {
         let mut app = test_app_in_new_agent_mode();
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+        if let Mode::NewAgent(state) = &mut app.mode {
+            let focus = &mut state.focus;
             *focus = NewAgentFocus::Name;
         }
         let action = app.handle_key(make_key(KeyCode::Char('q')));

@@ -1,13 +1,14 @@
 mod agent;
-mod agent_table;
 mod app;
 mod config;
 mod gitlab;
-mod new_agent_panel;
 mod notifications;
-mod source_picker;
+mod panel;
+mod picker;
 mod style;
+mod table;
 mod ui;
+mod wizard;
 
 use std::time::Duration;
 
@@ -404,6 +405,132 @@ fn run_prompt_editor_with(editor: &str, initial_prompt: &str) -> Result<String, 
     Ok(edited)
 }
 
+trait TerminalRestore {
+    fn enable_raw_mode(&mut self) -> std::io::Result<()>;
+    fn enter_alternate_screen(&mut self) -> std::io::Result<()>;
+    fn hide_cursor(&mut self) -> std::io::Result<()>;
+    fn clear_terminal(&mut self) -> std::io::Result<()>;
+    fn restart_events(&mut self);
+}
+
+fn remember_first_error(first_error: &mut Option<std::io::Error>, result: std::io::Result<()>) {
+    if first_error.is_none()
+        && let Err(error) = result
+    {
+        *first_error = Some(error);
+    }
+}
+
+fn resume_terminal_state(restore: &mut impl TerminalRestore) -> std::io::Result<()> {
+    let mut first_error = None;
+
+    remember_first_error(&mut first_error, restore.enable_raw_mode());
+    remember_first_error(&mut first_error, restore.enter_alternate_screen());
+    remember_first_error(&mut first_error, restore.hide_cursor());
+    remember_first_error(&mut first_error, restore.clear_terminal());
+    restore.restart_events();
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+struct CrosstermTerminalRestore<'a> {
+    terminal: &'a mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    events: &'a mut EventHandle,
+}
+
+impl TerminalRestore for CrosstermTerminalRestore<'_> {
+    fn enable_raw_mode(&mut self) -> std::io::Result<()> {
+        enable_raw_mode()
+    }
+
+    fn enter_alternate_screen(&mut self) -> std::io::Result<()> {
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableFocusChange
+        )
+    }
+
+    fn hide_cursor(&mut self) -> std::io::Result<()> {
+        self.terminal.hide_cursor()
+    }
+
+    fn clear_terminal(&mut self) -> std::io::Result<()> {
+        self.terminal.clear()
+    }
+
+    fn restart_events(&mut self) {
+        self.events.restart();
+    }
+}
+
+fn resume_terminal_after_suspend(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    events: &mut EventHandle,
+) -> std::io::Result<()> {
+    let mut restore = CrosstermTerminalRestore { terminal, events };
+    resume_terminal_state(&mut restore)
+}
+
+fn combined_terminal_error(
+    error: Box<dyn std::error::Error>,
+    resume_error: std::io::Error,
+) -> Box<dyn std::error::Error> {
+    Box::new(std::io::Error::other(format!(
+        "{error}; additionally failed to resume terminal: {resume_error}"
+    )))
+}
+
+fn suspend_terminal_for_external(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    events: &mut EventHandle,
+) -> Result<(), Box<dyn std::error::Error>> {
+    events.stop();
+
+    let suspend_result = (|| -> std::io::Result<()> {
+        disable_raw_mode()?;
+        execute!(
+            terminal.backend_mut(),
+            DisableFocusChange,
+            LeaveAlternateScreen
+        )?;
+        terminal.show_cursor()?;
+        Ok(())
+    })();
+
+    if let Err(error) = suspend_result {
+        if let Err(resume_error) = resume_terminal_after_suspend(terminal, events) {
+            return Err(combined_terminal_error(Box::new(error), resume_error));
+        }
+        return Err(Box::new(error));
+    }
+
+    Ok(())
+}
+
+fn with_terminal_suspended<T>(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    events: &mut EventHandle,
+    operation: impl FnOnce(
+        &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    ) -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    suspend_terminal_for_external(terminal, events)?;
+
+    let operation_result = operation(terminal);
+    let resume_result = resume_terminal_after_suspend(terminal, events);
+
+    match (operation_result, resume_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(resume_error)) => Err(Box::new(resume_error)),
+        (Err(error), Err(resume_error)) => Err(combined_terminal_error(error, resume_error)),
+    }
+}
+
 fn stderr_tail(bytes: &[u8]) -> String {
     let stderr = String::from_utf8_lossy(bytes);
     stderr
@@ -502,6 +629,8 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                         content_hash,
                         attached_count,
                     });
+                } else {
+                    let _ = tx.send(Action::ActivityCaptureFailed { session_name });
                 }
             });
         }
@@ -806,28 +935,9 @@ async fn suspend_and_edit_prompt(
         }
     };
 
-    events.stop();
-
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableFocusChange,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-
-    let result = run_prompt_editor_with(&editor, &initial_prompt);
-
-    enable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        EnableFocusChange
-    )?;
-    terminal.hide_cursor()?;
-    terminal.clear()?;
-
-    events.restart();
+    let result = with_terminal_suspended(terminal, events, |_terminal| {
+        Ok(run_prompt_editor_with(&editor, &initial_prompt))
+    })?;
 
     for cmd in app.update(Action::PromptEdited(result)) {
         execute(cmd, action_tx);
@@ -845,35 +955,18 @@ async fn suspend_and_attach(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Sessions are pre-created via Command::PrepareAttach before this runs,
     // so the main loop stays responsive and we never await tmux setup here.
-    events.stop();
+    with_terminal_suspended(terminal, events, |terminal| {
+        let _ = agent::attach(&agent_to_attach.session_name);
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableFocusChange,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
+        // Erase tmux's "[detached ...]" line.
+        execute!(
+            terminal.backend_mut(),
+            crossterm::cursor::MoveUp(1),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
+        )?;
 
-    let _ = agent::attach(&agent_to_attach.session_name);
-
-    // Erase tmux's "[detached ...]" line
-    execute!(
-        terminal.backend_mut(),
-        crossterm::cursor::MoveUp(1),
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
-    )?;
-
-    enable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        EnableFocusChange
-    )?;
-    terminal.hide_cursor()?;
-    terminal.clear()?;
-
-    events.restart();
+        Ok(())
+    })?;
 
     // Detach reflows the pane (tmux resizes back from the client's geometry),
     // so the first post-detach capture-pane hash differs from the pre-attach
@@ -893,6 +986,59 @@ async fn suspend_and_attach(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_terminal_state_restarts_events_after_restore_error() {
+        #[derive(Default)]
+        struct FakeRestore {
+            calls: Vec<&'static str>,
+            restarted_events: bool,
+        }
+
+        impl TerminalRestore for FakeRestore {
+            fn enable_raw_mode(&mut self) -> std::io::Result<()> {
+                self.calls.push("enable_raw_mode");
+                Err(std::io::Error::other("raw failed"))
+            }
+
+            fn enter_alternate_screen(&mut self) -> std::io::Result<()> {
+                self.calls.push("enter_alternate_screen");
+                Ok(())
+            }
+
+            fn hide_cursor(&mut self) -> std::io::Result<()> {
+                self.calls.push("hide_cursor");
+                Ok(())
+            }
+
+            fn clear_terminal(&mut self) -> std::io::Result<()> {
+                self.calls.push("clear_terminal");
+                Ok(())
+            }
+
+            fn restart_events(&mut self) {
+                self.calls.push("restart_events");
+                self.restarted_events = true;
+            }
+        }
+
+        let mut restore = FakeRestore::default();
+
+        let error = resume_terminal_state(&mut restore).expect_err("first restore error");
+
+        assert_eq!(error.to_string(), "raw failed");
+        assert_eq!(
+            restore.calls,
+            [
+                "enable_raw_mode",
+                "enter_alternate_screen",
+                "hide_cursor",
+                "clear_terminal",
+                "restart_events",
+            ]
+        );
+        assert!(restore.restarted_events);
+    }
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()

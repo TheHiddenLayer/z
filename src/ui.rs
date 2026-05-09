@@ -1,7 +1,7 @@
-use crate::agent_table::AgentTableWidget;
 use crate::app::{App, Mode, MrSnapshot, PreviewMode};
 use crate::gitlab::{MergeRequest, MrDisplayKind, MrState, classify};
-use crate::new_agent_panel::NewAgentPanelWidget;
+use crate::panel::NewAgentPanelWidget;
+use crate::table::AgentTableWidget;
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -42,7 +42,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         status_bar,
     ] = inner.layout(&layout);
 
-    if matches!(app.mode, Mode::NewAgent { .. }) {
+    if matches!(app.mode, Mode::NewAgent(_)) {
         let widget = NewAgentPanelWidget::new(app);
         frame.render_widget(&widget, preview_pane);
     } else {
@@ -382,7 +382,7 @@ fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
         .collect();
     let mut widget = SeparatorWidget::new()
         .positions(&positions)
-        .new_agent_candidate(matches!(app.mode, Mode::NewAgent { .. }));
+        .new_agent_candidate(matches!(app.mode, Mode::NewAgent(_)));
     if let Some(label) = label {
         widget = widget.label(label);
     }
@@ -454,8 +454,8 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled(msg.as_str(), Style::default().fg(DIM)))
     } else if !app.keymap_visible {
         Line::from(Span::styled("?", Style::default().fg(DIM)))
-    } else if let Mode::NewAgent { focus, .. } = &app.mode {
-        crate::new_agent_panel::wizard_hint(focus)
+    } else if let Mode::NewAgent(state) = &app.mode {
+        crate::panel::wizard_hint(&state.focus)
     } else if app.selected_agent().is_some() {
         footer_hint(&selected_agent_keymap_items(app))
     } else {
@@ -583,7 +583,9 @@ mod tests {
     use super::*;
     use crate::agent::{Agent, AgentStatus};
     use crate::app::Action;
-    use crate::app::{BranchMode, Mode, MrKey, NewAgentFocus, NewAgentSource, RemoteList};
+    use crate::app::{
+        BranchMode, Mode, MrKey, NewAgent, NewAgentFocus, NewAgentSource, RemoteList,
+    };
     use crate::config::Config;
     use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
@@ -678,23 +680,22 @@ mod tests {
         None
     }
 
+    fn new_agent_state_mut(app: &mut App) -> &mut NewAgent {
+        match &mut app.mode {
+            Mode::NewAgent(state) => state,
+            _ => panic!("expected new-agent mode"),
+        }
+    }
+
     fn branch_source_app() -> App {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
-        if let Mode::NewAgent {
-            source,
-            focus,
-            branch_mode,
-            branches,
-            branch_name,
-            prompt,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Branch;
-            *focus = NewAgentFocus::Source;
-            *branch_mode = BranchMode::New;
-            *branches = vec![
+            let state = new_agent_state_mut(&mut app);
+            state.source = NewAgentSource::Branch;
+            state.focus = NewAgentFocus::Source;
+            state.branch_mode = BranchMode::New;
+            state.branches = vec![
                 "main".into(),
                 "team/render-task-list".into(),
                 "feat/configure-retry-env".into(),
@@ -702,8 +703,8 @@ mod tests {
                 "search_strategy".into(),
                 "fix/local-disk-pressure-cascade".into(),
             ];
-            *branch_name = "z-0506-138-feature-task-wizard-layout-polish".into();
-            prompt.clear();
+            state.branch_name = "z-0506-138-feature-task-wizard-layout-polish".into();
+            state.prompt.clear();
         }
         app
     }
@@ -843,9 +844,7 @@ mod tests {
         let mut app = test_app();
         app.keymap_visible = true;
         app.update(Action::StartNewAgent);
-        if let Mode::NewAgent { focus, .. } = &mut app.mode {
-            *focus = NewAgentFocus::BranchList;
-        }
+        new_agent_state_mut(&mut app).focus = NewAgentFocus::BranchList;
 
         let status = status_row_text(&app);
 
@@ -1029,9 +1028,7 @@ mod tests {
     #[test]
     fn prompt_summary_shows_prompt_content() {
         let mut app = branch_source_app();
-        if let Mode::NewAgent { prompt, .. } = &mut app.mode {
-            *prompt = "Refine wizard layout behavior".into();
-        }
+        new_agent_state_mut(&mut app).prompt = "Refine wizard layout behavior".into();
 
         let text = render_app(&app);
 
@@ -1064,14 +1061,10 @@ mod tests {
     #[test]
     fn pristine_long_branch_name_is_truncated_when_name_focused() {
         let mut app = branch_source_app();
-        if let Mode::NewAgent {
-            focus,
-            name_pristine,
-            ..
-        } = &mut app.mode
         {
-            *focus = NewAgentFocus::Name;
-            *name_pristine = true;
+            let state = new_agent_state_mut(&mut app);
+            state.focus = NewAgentFocus::Name;
+            state.name_pristine = true;
         }
 
         let full_name = "z-0506-138-feature-task-wizard-layout-polish";
@@ -1117,19 +1110,12 @@ mod tests {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
 
-        if let Mode::NewAgent {
-            focus,
-            issues,
-            source_index,
-            ..
-        } = &mut app.mode
         {
-            *focus = NewAgentFocus::SourceList;
-            *source_index = 7;
-            *issues =
+            let state = new_agent_state_mut(&mut app);
+            state.focus = NewAgentFocus::SourceList;
+            state.source_index = 7;
+            state.issues =
                 RemoteList::Loaded((1..=8).map(|n| issue(n, &format!("Issue {n}"))).collect());
-        } else {
-            panic!("expected new-agent mode");
         }
 
         let text = render_app(&app);
@@ -1149,25 +1135,16 @@ mod tests {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
 
-        if let Mode::NewAgent {
-            focus,
-            source,
-            mrs,
-            source_index,
-            selected_mr,
-            ..
-        } = &mut app.mode
         {
-            *focus = NewAgentFocus::SourceList;
-            *source = NewAgentSource::Mr;
-            *source_index = 7;
+            let state = new_agent_state_mut(&mut app);
+            state.focus = NewAgentFocus::SourceList;
+            state.source = NewAgentSource::Mr;
+            state.source_index = 7;
             let items = (1..=8)
                 .map(|n| mr(n, &format!("MR {n}"), &format!("feature/mr-{n}")))
                 .collect::<Vec<_>>();
-            *selected_mr = items.get(7).cloned();
-            *mrs = RemoteList::Loaded(items);
-        } else {
-            panic!("expected new-agent mode");
+            state.selected_mr = items.get(7).cloned();
+            state.mrs = RemoteList::Loaded(items);
         }
 
         let text = render_app(&app);
@@ -1187,25 +1164,16 @@ mod tests {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
 
-        if let Mode::NewAgent {
-            focus,
-            source,
-            mrs,
-            source_index,
-            selected_mr,
-            ..
-        } = &mut app.mode
         {
-            *focus = NewAgentFocus::SourceList;
-            *source = NewAgentSource::Mr;
-            *source_index = 5;
+            let state = new_agent_state_mut(&mut app);
+            state.focus = NewAgentFocus::SourceList;
+            state.source = NewAgentSource::Mr;
+            state.source_index = 5;
             let items = (1..=7)
                 .map(|n| mr(n, &format!("MR {n}"), &format!("feature/mr-{n}")))
                 .collect::<Vec<_>>();
-            *selected_mr = items.get(5).cloned();
-            *mrs = RemoteList::Loaded(items);
-        } else {
-            panic!("expected new-agent mode");
+            state.selected_mr = items.get(5).cloned();
+            state.mrs = RemoteList::Loaded(items);
         }
 
         app.update(Action::PickerNext);
@@ -1226,22 +1194,13 @@ mod tests {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
 
-        if let Mode::NewAgent {
-            focus,
-            source,
-            branch_mode,
-            branches,
-            base_index,
-            ..
-        } = &mut app.mode
         {
-            *focus = NewAgentFocus::BranchList;
-            *source = NewAgentSource::Branch;
-            *branch_mode = BranchMode::New;
-            *base_index = 7;
-            *branches = (1..=8).map(|n| format!("branch-{n}")).collect();
-        } else {
-            panic!("expected new-agent mode");
+            let state = new_agent_state_mut(&mut app);
+            state.focus = NewAgentFocus::BranchList;
+            state.source = NewAgentSource::Branch;
+            state.branch_mode = BranchMode::New;
+            state.base_index = 7;
+            state.branches = (1..=8).map(|n| format!("branch-{n}")).collect();
         }
 
         let text = render_app(&app);
