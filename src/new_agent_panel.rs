@@ -7,8 +7,8 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, List, ListItem, ListState, Padding, Paragraph,
-        StatefulWidget, Widget, Wrap,
+        Block, BorderType, Borders, List, ListItem, ListState, Padding, Paragraph, StatefulWidget,
+        Widget, Wrap,
     },
 };
 
@@ -563,27 +563,25 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
 /// Per-focus hint line for the wizard, surfaced by the global status bar
 /// while `Mode::NewAgent` is active.
 pub(crate) fn wizard_hint(focus: &NewAgentFocus) -> Line<'static> {
-    match focus {
+    let mut items = match focus {
         NewAgentFocus::Source
         | NewAgentFocus::Agent
         | NewAgentFocus::Repo
         | NewAgentFocus::BranchToggle => {
-            footer_hint(&[("←/→", "cycle"), ("tab", "next"), ("q/esc", "cancel")])
+            vec![("←/→", "cycle"), ("tab", "next"), ("q/esc", "cancel")]
         }
-        NewAgentFocus::Search => {
-            footer_hint(&[("type", "filter"), ("tab", "list"), ("esc", "cancel")])
-        }
-        NewAgentFocus::SourceList | NewAgentFocus::BranchList => footer_hint(&[
+        NewAgentFocus::Search => vec![("type", "filter"), ("tab", "list"), ("esc", "cancel")],
+        NewAgentFocus::SourceList | NewAgentFocus::BranchList => vec![
             ("↑/k", "up"),
             ("↓/j", "down"),
             ("enter", "start"),
             ("tab", "next"),
-        ]),
-        NewAgentFocus::Name => footer_hint(&[("tab", "next"), ("esc", "cancel")]),
-        NewAgentFocus::Prompt => {
-            footer_hint(&[("enter", "start"), ("e", "edit"), ("esc", "cancel")])
-        }
-    }
+        ],
+        NewAgentFocus::Name => vec![("tab", "next"), ("esc", "cancel")],
+        NewAgentFocus::Prompt => vec![("enter", "start"), ("e", "edit"), ("esc", "cancel")],
+    };
+    items.push(("?", "hide"));
+    footer_hint(&items)
 }
 
 #[cfg(test)]
