@@ -1255,6 +1255,8 @@ detached
 
         std::fs::create_dir_all(&repo).unwrap();
         run(&["init", "-q", "-b", "main"], &repo);
+        run(&["config", "user.name", "z test"], &repo);
+        run(&["config", "user.email", "z-test@example.invalid"], &repo);
         run(&["commit", "-q", "--allow-empty", "-m", "init"], &repo);
         run(&["config", "extensions.worktreeConfig", "true"], &repo);
 
