@@ -5,6 +5,7 @@ mod config;
 mod gitlab;
 mod new_agent_panel;
 mod notifications;
+mod source_picker;
 mod style;
 mod ui;
 
@@ -779,6 +780,9 @@ fn execute(cmd: Command, tx: &mpsc::UnboundedSender<Action>) {
                     .map_err(|e| e.to_string());
                 let _ = tx.send(Action::GitlabMrsLoaded { repo, result });
             });
+        }
+        Command::Notify { title, body } => {
+            notifications::fire(&title, &body);
         }
         Command::Attach(_) => unreachable!("Attach handled by dispatch"),
         Command::EditPrompt { .. } => unreachable!("EditPrompt handled by dispatch"),
