@@ -449,12 +449,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             };
             (placeholder.to_string(), Style::default().fg(DIM))
         } else {
-            let style = if is_search {
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(TEXT)
-            };
-            (source_query.clone(), style)
+            (source_query.clone(), Style::default().fg(TEXT))
         };
         let search_inner = render_focus_frame(is_search, search_value_rect, buf);
         Paragraph::new(Span::styled(search_value_text, search_value_style))
@@ -495,26 +490,13 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         let name_value_width = (name_inner.width as usize)
             .max(1)
             .min(MAX_TASK_NAME_WIDTH as usize);
-        let name_display = if is_name && *name_pristine {
-            // Pristine auto-suggested name: dim + italic so it reads as a
-            // placeholder that will be replaced the moment the user types.
-            let name = truncate_middle(branch_name, name_value_width);
-            Span::styled(
-                name,
-                Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
-            )
+        let name = truncate_middle(branch_name, name_value_width);
+        let style = if *name_pristine {
+            Style::default().fg(DIM)
         } else {
-            let cursor = if is_name { "_" } else { "" };
-            let max_width = name_value_width.saturating_sub(cursor.len());
-            let name = truncate_middle(branch_name, max_width);
-            let style = if is_name {
-                Style::default().fg(TEXT)
-            } else {
-                Style::default().fg(DIM)
-            };
-            Span::styled(format!("{name}{cursor}"), style)
+            Style::default().fg(TEXT)
         };
-        Paragraph::new(Line::from(name_display)).render(name_inner, buf);
+        Paragraph::new(Span::styled(name, style)).render(name_inner, buf);
     } else if show_issue_name {
         let (name_label_rect, name_value_rect) = split_row(name_row);
         render_label("Name", false, name_label_rect, buf);
