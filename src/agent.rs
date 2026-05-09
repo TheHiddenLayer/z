@@ -276,6 +276,23 @@ pub fn discover_agents(
 
 use tokio::process::Command;
 
+async fn checked_output(
+    mut command: Command,
+    context: &str,
+) -> Result<std::process::Output, String> {
+    let output = command
+        .output()
+        .await
+        .map_err(|e| format!("{context}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{context}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(output)
+}
+
 pub async fn list_worktrees(repo_path: &Path) -> Result<Vec<Worktree>, String> {
     let output = Command::new("git")
         .arg("-C")
@@ -498,28 +515,30 @@ pub async fn create_worktree(
     // agent metadata into the worktree's own config. Keying by worktree (not
     // branch) means a `git checkout` inside the worktree doesn't orphan the
     // metadata.
-    let _ = Command::new("git")
+    let mut enable_config = Command::new("git");
+    enable_config
         .arg("-C")
         .arg(repo_path)
-        .args(["config", "extensions.worktreeConfig", "true"])
-        .output()
-        .await;
+        .args(["config", "extensions.worktreeConfig", "true"]);
+    checked_output(enable_config, "git config extensions.worktreeConfig failed").await?;
 
     if let Some(base) = base_branch {
-        let _ = Command::new("git")
+        let mut config_base = Command::new("git");
+        config_base
             .arg("-C")
             .arg(&worktree_path)
-            .args(["config", "--worktree", "z.base", base])
-            .output()
-            .await;
+            .args(["config", "--worktree", "z.base", base]);
+        checked_output(config_base, "git config z.base failed").await?;
     }
 
-    let _ = Command::new("git")
-        .arg("-C")
-        .arg(&worktree_path)
-        .args(["config", "--worktree", "z.agent", agent_name])
-        .output()
-        .await;
+    let mut config_agent = Command::new("git");
+    config_agent.arg("-C").arg(&worktree_path).args([
+        "config",
+        "--worktree",
+        "z.agent",
+        agent_name,
+    ]);
+    checked_output(config_agent, "git config z.agent failed").await?;
 
     Ok(worktree_path)
 }
@@ -904,6 +923,73 @@ pub(crate) mod tests {
         assert_git(repo, &["add", "file.txt"]);
         assert_git(repo, &["commit", "-q", "-m", message]);
         git_stdout(repo, &["rev-parse", "HEAD"])
+    }
+
+    fn setup_worktree_repo(name: &str) -> (PathBuf, PathBuf) {
+        let tmp = unique_temp_dir(name);
+        let repo = tmp.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert_git(&repo, &["init", "-q", "-b", "main"]);
+        assert_git(&repo, &["config", "user.email", "redacted"]);
+        assert_git(&repo, &["config", "user.name", "Z Test"]);
+        write_commit(&repo, "base\n", "base");
+        (tmp, repo)
+    }
+
+    #[tokio::test]
+    async fn create_worktree_reports_worktree_config_enable_failure() {
+        let (tmp, repo) = setup_worktree_repo("config-lock");
+        std::fs::File::create(repo.join(".git/config.lock")).unwrap();
+
+        let error = create_worktree(&repo, "feature/config-lock", true, None, "claude")
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.contains("git config extensions.worktreeConfig failed"),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn create_worktree_reports_base_metadata_write_failure() {
+        let (tmp, repo) = setup_worktree_repo("base-config-failure");
+        assert_git(&repo, &["branch", "feature/base-config"]);
+
+        let error = create_worktree(
+            &repo,
+            "feature/base-config",
+            false,
+            Some("main\0bad"),
+            "claude",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.contains("git config z.base failed"),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn create_worktree_reports_agent_metadata_write_failure() {
+        let (tmp, repo) = setup_worktree_repo("agent-config-failure");
+
+        let error = create_worktree(&repo, "feature/agent-config", true, None, "claude\0bad")
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.contains("git config z.agent failed"),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     fn setup_gitlab_mr_repo(

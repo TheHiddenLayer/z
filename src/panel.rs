@@ -1,6 +1,6 @@
 use crate::app::{App, BranchMode, Mode, NewAgentFocus, NewAgentSource, RemoteList};
 use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
-use crate::source_picker::{filtered_issue_indices, filtered_mr_indices, issue_label, mr_label};
+use crate::picker::{filtered_issue_indices, filtered_mr_indices, issue_label, mr_label};
 use crate::style::{DIM, TEXT, footer_hint};
 use ratatui::{
     buffer::Buffer,
@@ -43,7 +43,7 @@ impl<'a> NewAgentPanelWidget<'a> {
 
 impl Widget for &NewAgentPanelWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        if matches!(self.app.mode, Mode::NewAgent { .. }) {
+        if matches!(self.app.mode, Mode::NewAgent(_)) {
             render_new_agent_panel(self.app, area, buf);
         }
     }
@@ -289,50 +289,39 @@ fn source_list_height(
 fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     let inner = area;
 
-    let Mode::NewAgent {
-        repo_index,
-        source,
-        source_query,
-        source_index,
-        issues,
-        mrs,
-        selected_issue: _,
-        selected_mr: _,
-        branch_mode,
-        prompt,
-        focus,
-        base_index,
-        branches,
-        existing_branches,
-        branch_name,
-        name_pristine,
-        agent_name,
-    } = &app.mode
-    else {
+    let Mode::NewAgent(state) = &app.mode else {
         return;
     };
+    let state = state.as_ref();
 
     let repos = app.config.resolved_repos();
     let repo_name = repos
-        .get(*repo_index)
+        .get(state.repo_index)
         .and_then(|r| r.file_name())
         .and_then(|n| n.to_str())
         .unwrap_or("?");
 
-    let active_list: &[String] = match branch_mode {
-        BranchMode::New => branches,
-        BranchMode::Existing => existing_branches,
+    let active_list: &[String] = match state.branch_mode {
+        BranchMode::New => &state.branches,
+        BranchMode::Existing => &state.existing_branches,
     };
-    let desired_list_height = source_list_height(*source, issues, mrs, active_list, source_query);
-    let show_gitlab_source = matches!(source, NewAgentSource::Issue | NewAgentSource::Mr);
-    let show_branch_controls = matches!(source, NewAgentSource::Branch | NewAgentSource::Issue);
-    let show_branch_toggle = matches!(source, NewAgentSource::Branch);
+    let desired_list_height = source_list_height(
+        state.source,
+        &state.issues,
+        &state.mrs,
+        active_list,
+        &state.source_query,
+    );
+    let show_gitlab_source = matches!(state.source, NewAgentSource::Issue | NewAgentSource::Mr);
+    let show_branch_controls =
+        matches!(state.source, NewAgentSource::Branch | NewAgentSource::Issue);
+    let show_branch_toggle = matches!(state.source, NewAgentSource::Branch);
     let show_name = show_branch_controls
-        && matches!(branch_mode, BranchMode::New)
-        && !matches!(source, NewAgentSource::Issue);
-    let show_issue_name = matches!(source, NewAgentSource::Issue);
+        && matches!(state.branch_mode, BranchMode::New)
+        && !matches!(state.source, NewAgentSource::Issue);
+    let show_issue_name = matches!(state.source, NewAgentSource::Issue);
     let show_name_row = show_name || show_issue_name;
-    let is_prompt = matches!(focus, NewAgentFocus::Prompt);
+    let is_prompt = matches!(state.focus, NewAgentFocus::Prompt);
     let list_height = desired_list_height.clamp(1, 6);
 
     // Row order. `Length(0)` rows render nothing and consume nothing visually.
@@ -371,15 +360,15 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     ] = inner.layout(&layout);
 
     // --- Repo row ---
-    let is_repo = matches!(focus, NewAgentFocus::Repo);
+    let is_repo = matches!(state.focus, NewAgentFocus::Repo);
     let (repo_label_rect, repo_value_rect) = split_row(repo_row);
     render_label("Repo", is_repo, repo_label_rect, buf);
     let repo_inner = render_focus_frame(is_repo, repo_value_rect, buf);
     render_value(repo_name, is_repo, repo_inner, buf);
 
     // --- Source row ---
-    let is_source = matches!(focus, NewAgentFocus::Source);
-    let source_selected = match source {
+    let is_source = matches!(state.focus, NewAgentFocus::Source);
+    let source_selected = match state.source {
         NewAgentSource::Issue => 0,
         NewAgentSource::Mr => 1,
         NewAgentSource::Branch => 2,
@@ -392,8 +381,8 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
 
     // --- Branch toggle row ---
     if show_branch_toggle {
-        let is_toggle = matches!(focus, NewAgentFocus::BranchToggle);
-        let toggle_selected = match branch_mode {
+        let is_toggle = matches!(state.focus, NewAgentFocus::BranchToggle);
+        let toggle_selected = match state.branch_mode {
             BranchMode::New => 0,
             BranchMode::Existing => 1,
         };
@@ -406,18 +395,18 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
 
     // --- Source or branch list ---
     if show_gitlab_source {
-        let is_search = matches!(focus, NewAgentFocus::Search);
+        let is_search = matches!(state.focus, NewAgentFocus::Search);
         let (search_label_rect, search_value_rect) = split_row(search_row);
         render_label("Search", is_search, search_label_rect, buf);
-        let (search_value_text, search_value_style) = if source_query.is_empty() {
-            let placeholder = match source {
+        let (search_value_text, search_value_style) = if state.source_query.is_empty() {
+            let placeholder = match state.source {
                 NewAgentSource::Issue => "filter issues...",
                 NewAgentSource::Mr => "filter MRs...",
                 NewAgentSource::Branch => "",
             };
             (placeholder.to_string(), Style::default().fg(DIM))
         } else {
-            (source_query.clone(), Style::default().fg(TEXT))
+            (state.source_query.clone(), Style::default().fg(TEXT))
         };
         let search_inner = render_focus_frame(is_search, search_value_rect, buf);
         Paragraph::new(Span::styled(search_value_text, search_value_style))
@@ -425,19 +414,22 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     }
 
     let (_l, list_value) = split_row(list_area);
-    let list_focused = matches!(focus, NewAgentFocus::SourceList | NewAgentFocus::BranchList);
+    let list_focused = matches!(
+        state.focus,
+        NewAgentFocus::SourceList | NewAgentFocus::BranchList
+    );
     let list_inner = render_focus_frame(list_focused, list_value, buf);
-    let payload = match source {
-        NewAgentSource::Issue => issue_items(issues, source_query),
-        NewAgentSource::Mr => mr_items(mrs, source_query),
-        NewAgentSource::Branch => branch_items(active_list, branch_mode),
+    let payload = match state.source {
+        NewAgentSource::Issue => issue_items(&state.issues, &state.source_query),
+        NewAgentSource::Mr => mr_items(&state.mrs, &state.source_query),
+        NewAgentSource::Branch => branch_items(active_list, &state.branch_mode),
     };
     match payload {
         ListPayload::Status(msg) => render_remote_status(&msg, list_inner, buf),
         ListPayload::Items { labels, indices } => {
-            let target_index = match source {
-                NewAgentSource::Issue | NewAgentSource::Mr => *source_index,
-                NewAgentSource::Branch => *base_index,
+            let target_index = match state.source {
+                NewAgentSource::Issue | NewAgentSource::Mr => state.source_index,
+                NewAgentSource::Branch => state.base_index,
             };
             let selected_pos = indices.iter().position(|&i| i == target_index);
             let items: Vec<ListItem> = labels.into_iter().map(ListItem::new).collect();
@@ -451,15 +443,15 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
 
     // --- Name row ---
     if show_name {
-        let is_name = matches!(focus, NewAgentFocus::Name);
+        let is_name = matches!(state.focus, NewAgentFocus::Name);
         let (name_label_rect, name_value_rect) = split_row(name_row);
         render_label("Name", is_name, name_label_rect, buf);
         let name_inner = render_focus_frame(is_name, name_value_rect, buf);
         let name_value_width = (name_inner.width as usize)
             .max(1)
             .min(MAX_TASK_NAME_WIDTH as usize);
-        let name = truncate_middle(branch_name, name_value_width);
-        let style = if *name_pristine {
+        let name = truncate_middle(&state.branch_name, name_value_width);
+        let style = if state.name_pristine {
             Style::default().fg(DIM)
         } else {
             Style::default().fg(TEXT)
@@ -472,7 +464,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         let name_value_width = (name_inner.width as usize)
             .max(1)
             .min(MAX_TASK_NAME_WIDTH as usize);
-        let name = truncate_middle(branch_name, name_value_width);
+        let name = truncate_middle(&state.branch_name, name_value_width);
         Paragraph::new(Span::styled(name, Style::default().fg(TEXT))).render(name_inner, buf);
     }
 
@@ -483,10 +475,10 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     render_label("Prompt", is_prompt, prompt_label_rect, buf);
     let body_inner = render_focus_frame(is_prompt, body_rect, buf);
     if !is_prompt {
-        let summary = prompt_summary(prompt, body_inner.width);
+        let summary = prompt_summary(&state.prompt, body_inner.width);
         Paragraph::new(Span::styled(summary, Style::default().fg(DIM))).render(body_inner, buf);
     } else {
-        let text = prompt.as_str();
+        let text = state.prompt.as_str();
         let width = body_inner.width.max(1) as usize;
         let line_count: u16 = text
             .split('\n')
@@ -507,7 +499,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     }
 
     // --- Agent tabs ---
-    let is_agent = matches!(focus, NewAgentFocus::Agent);
+    let is_agent = matches!(state.focus, NewAgentFocus::Agent);
     let agent_options: Vec<&str> = app
         .config
         .agents
@@ -516,7 +508,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         .collect();
     let agent_selected = agent_options
         .iter()
-        .position(|name| *name == agent_name)
+        .position(|name| *name == state.agent_name)
         .unwrap_or(0);
     let (agent_label_rect, agent_value_rect) = split_row(agent_row);
     render_label("Agent", is_agent, agent_label_rect, buf);
@@ -556,6 +548,7 @@ pub(crate) fn wizard_hint(focus: &NewAgentFocus) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::NewAgent;
 
     fn issue(iid: u64, title: &str) -> GitlabIssue {
         GitlabIssue {
@@ -574,6 +567,13 @@ mod tests {
             web_url: None,
             source_branch: source_branch.to_string(),
             target_branch: None,
+        }
+    }
+
+    fn wizard_state_mut(app: &mut App) -> &mut NewAgent {
+        match &mut app.mode {
+            Mode::NewAgent(state) => state,
+            _ => panic!("expected new-agent mode"),
         }
     }
 
@@ -652,27 +652,19 @@ mod tests {
     #[test]
     fn list_selection_change_keeps_items_at_same_column() {
         let mut app = wizard_app();
-        if let Mode::NewAgent {
-            source,
-            issues,
-            source_index,
-            focus,
-            ..
-        } = &mut app.mode
         {
-            *source = NewAgentSource::Issue;
-            *issues =
+            let state = wizard_state_mut(&mut app);
+            state.source = NewAgentSource::Issue;
+            state.issues =
                 RemoteList::Loaded(vec![issue(1, "alpha"), issue(2, "beta"), issue(3, "gamma")]);
-            *source_index = 0;
-            *focus = NewAgentFocus::SourceList;
+            state.source_index = 0;
+            state.focus = NewAgentFocus::SourceList;
         }
         let area = Rect::new(0, 0, 80, 24);
         let mut buf_a = Buffer::empty(area);
         NewAgentPanelWidget::new(&app).render(area, &mut buf_a);
 
-        if let Mode::NewAgent { source_index, .. } = &mut app.mode {
-            *source_index = 1;
-        }
+        wizard_state_mut(&mut app).source_index = 1;
         let mut buf_b = Buffer::empty(area);
         NewAgentPanelWidget::new(&app).render(area, &mut buf_b);
 
@@ -711,7 +703,7 @@ mod tests {
         );
     }
 
-    /// Build a minimal `App` whose `mode` is `Mode::NewAgent { .. }`.
+    /// Build a minimal `App` whose `mode` is `Mode::NewAgent(_)`.
     ///
     /// Mirrors `app::tests::test_app_in_new_agent_mode`, but kept self-contained
     /// here because that helper lives in a private `#[cfg(test)] mod tests`
@@ -720,7 +712,7 @@ mod tests {
         let toml_str = r#"repos = ["~/src/myapp"]"#;
         let config = crate::config::Config::from_toml_str(toml_str).unwrap();
         let mut app = App::new(config);
-        app.mode = Mode::NewAgent {
+        app.mode = Mode::NewAgent(Box::new(NewAgent {
             repo_index: 0,
             source: NewAgentSource::Branch,
             source_query: String::new(),
@@ -738,7 +730,7 @@ mod tests {
             branch_name: "z-0409-1".into(),
             name_pristine: true,
             agent_name: "codex".to_string(),
-        };
+        }));
         app
     }
 
@@ -746,9 +738,7 @@ mod tests {
         // `App` isn't `Clone` (Config and several inner types don't derive it),
         // so build a fresh wizard app per call instead of cloning.
         let mut app = wizard_app();
-        if let Mode::NewAgent { focus: f, .. } = &mut app.mode {
-            *f = focus;
-        }
+        wizard_state_mut(&mut app).focus = focus;
         let mut buf = Buffer::empty(area);
         NewAgentPanelWidget::new(&app).render(area, &mut buf);
         buf
@@ -795,9 +785,10 @@ mod tests {
     #[test]
     fn collapsed_prompt_summary_renders_in_first_body_row_only() {
         let mut app = wizard_app();
-        if let Mode::NewAgent { focus, prompt, .. } = &mut app.mode {
-            *focus = NewAgentFocus::Repo;
-            *prompt = "describe the work".to_string();
+        {
+            let state = wizard_state_mut(&mut app);
+            state.focus = NewAgentFocus::Repo;
+            state.prompt = "describe the work".to_string();
         }
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
@@ -875,9 +866,10 @@ mod tests {
     #[test]
     fn focused_prompt_wrapped_lines_align_to_value_column() {
         let mut app = wizard_app();
-        if let Mode::NewAgent { focus, prompt, .. } = &mut app.mode {
-            *focus = NewAgentFocus::Prompt;
-            *prompt = "a ".repeat(60);
+        {
+            let state = wizard_state_mut(&mut app);
+            state.focus = NewAgentFocus::Prompt;
+            state.prompt = "a ".repeat(60);
         }
         let area = Rect::new(0, 0, 50, 24);
         let mut buf = Buffer::empty(area);
