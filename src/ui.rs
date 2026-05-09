@@ -186,6 +186,7 @@ fn selected_agent_keymap_items(app: &App) -> Vec<(&'static str, &'static str)> {
         PreviewMode::MergeRequest => "session",
     };
     items.push(("tab", preview_label));
+    items.push(("q", "quit"));
     items.push(("?", "hide"));
     items
 }
@@ -505,13 +506,9 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(msg3), line_3);
 
     let hint = if has_session {
-        footer_hint(&[
-            ("y", "delete + tmux"),
-            ("p", "preserve tmux"),
-            ("q/esc", "cancel"),
-        ])
+        footer_hint(&[("y", "delete"), ("p", "keep tmux"), ("esc", "cancel")])
     } else {
-        footer_hint(&[("y", "delete"), ("q/esc", "cancel")])
+        footer_hint(&[("y", "delete"), ("esc", "cancel")])
     };
     let mut spans = vec![Span::raw("  ")];
     spans.extend(hint.spans);
@@ -575,7 +572,7 @@ fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
         detail_row,
     );
 
-    let hint = footer_hint(&[("y", "merge"), ("q/esc", "cancel")]);
+    let hint = footer_hint(&[("y", "merge"), ("esc", "cancel")]);
     let mut spans = vec![Span::raw("  ")];
     spans.extend(hint.spans);
     frame.render_widget(Paragraph::new(Line::from(spans)), hint_bar);
@@ -586,7 +583,7 @@ mod tests {
     use super::*;
     use crate::agent::{Agent, AgentStatus};
     use crate::app::Action;
-    use crate::app::{BranchMode, Mode, NewAgentFocus, NewAgentSource, RemoteList};
+    use crate::app::{BranchMode, Mode, MrKey, NewAgentFocus, NewAgentSource, RemoteList};
     use crate::config::Config;
     use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
@@ -757,6 +754,10 @@ mod tests {
             status.contains("? hide"),
             "visible keymap should always include the question-mark hide toggle:\n{status}"
         );
+        assert!(
+            status.contains("q quit"),
+            "visible keymap should advertise the top-level quit key:\n{status}"
+        );
     }
 
     #[test]
@@ -831,6 +832,58 @@ mod tests {
             status.contains("? hide"),
             "visible wizard keymap should include the global hide toggle:\n{status}"
         );
+        assert!(
+            !status.contains("q/esc"),
+            "visible wizard keymap should not advertise q as cancel:\n{status}"
+        );
+    }
+
+    #[test]
+    fn visible_new_agent_list_keymap_shows_esc_cancel() {
+        let mut app = test_app();
+        app.keymap_visible = true;
+        app.update(Action::StartNewAgent);
+        if let Mode::NewAgent { focus, .. } = &mut app.mode {
+            *focus = NewAgentFocus::BranchList;
+        }
+
+        let status = status_row_text(&app);
+
+        assert!(
+            status.contains("esc cancel"),
+            "visible list keymap should advertise esc as cancel:\n{status}"
+        );
+        assert!(
+            !status.contains("q/esc"),
+            "visible list keymap should not advertise q as cancel:\n{status}"
+        );
+    }
+
+    #[test]
+    fn delete_modal_hint_only_names_esc_cancel() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        app.update(Action::StartDelete);
+
+        let text = render_app(&app);
+
+        assert!(text.contains("esc cancel"));
+        assert!(!text.contains("q/esc cancel"));
+    }
+
+    #[test]
+    fn merge_modal_hint_only_names_esc_cancel() {
+        let mut app = test_app();
+        app.mode = Mode::ConfirmMerge {
+            key: MrKey::new("/tmp/myapp".into(), "fix-auth".into()),
+            id_or_branch: "1".into(),
+            title: "Fix auth".into(),
+        };
+
+        let text = render_app(&app);
+
+        assert!(text.contains("esc cancel"));
+        assert!(!text.contains("q/esc cancel"));
     }
 
     #[test]

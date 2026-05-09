@@ -536,7 +536,7 @@ pub(crate) fn wizard_hint(focus: &NewAgentFocus) -> Line<'static> {
         | NewAgentFocus::Agent
         | NewAgentFocus::Repo
         | NewAgentFocus::BranchToggle => {
-            vec![("←/→", "cycle"), ("tab", "next"), ("q/esc", "cancel")]
+            vec![("←/→", "cycle"), ("tab", "next"), ("esc", "cancel")]
         }
         NewAgentFocus::Search => vec![("type", "filter"), ("tab", "list"), ("esc", "cancel")],
         NewAgentFocus::SourceList | NewAgentFocus::BranchList => vec![
@@ -544,6 +544,7 @@ pub(crate) fn wizard_hint(focus: &NewAgentFocus) -> Line<'static> {
             ("↓/j", "down"),
             ("enter", "start"),
             ("tab", "next"),
+            ("esc", "cancel"),
         ],
         NewAgentFocus::Name => vec![("tab", "next"), ("esc", "cancel")],
         NewAgentFocus::Prompt => vec![("enter", "start"), ("e", "edit"), ("esc", "cancel")],
