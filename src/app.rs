@@ -2271,7 +2271,7 @@ impl App {
 
         match &self.mode {
             Mode::Normal => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
+                KeyCode::Char('q') => Some(Action::Quit),
                 KeyCode::Char('j') | KeyCode::Down => Some(Action::MoveDown),
                 KeyCode::Char('k') | KeyCode::Up => Some(Action::MoveUp),
                 KeyCode::Char('n') => Some(Action::StartNewAgent),
@@ -2292,7 +2292,6 @@ impl App {
             },
             Mode::ConfirmDelete => match key.code {
                 KeyCode::Esc => Some(Action::CancelMode),
-                KeyCode::Char('q') => Some(Action::CancelMode),
                 KeyCode::Char('y') => Some(Action::DeleteAll {
                     preserve_tmux: false,
                 }),
@@ -2302,7 +2301,7 @@ impl App {
                 _ => None,
             },
             Mode::ConfirmMerge { .. } => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => Some(Action::CancelMode),
+                KeyCode::Esc => Some(Action::CancelMode),
                 KeyCode::Char('y') => Some(Action::MrMergeConfirmed),
                 _ => None,
             },
@@ -2372,11 +2371,6 @@ impl App {
                         && key.modifiers == crossterm::event::KeyModifiers::NONE =>
                 {
                     Some(Action::EditPrompt)
-                }
-                KeyCode::Char('q')
-                    if !matches!(focus, NewAgentFocus::Search | NewAgentFocus::Name) =>
-                {
-                    Some(Action::CancelMode)
                 }
                 KeyCode::Char(c)
                     if matches!(focus, NewAgentFocus::Search | NewAgentFocus::Name) =>
@@ -4423,6 +4417,20 @@ mod tests {
     }
 
     #[test]
+    fn normal_q_quits() {
+        let app = test_app();
+        let action = app.handle_key(make_key(KeyCode::Char('q')));
+        assert!(matches!(action, Some(Action::Quit)));
+    }
+
+    #[test]
+    fn normal_esc_does_not_quit() {
+        let app = test_app();
+        let action = app.handle_key(make_key(KeyCode::Esc));
+        assert!(action.is_none());
+    }
+
+    #[test]
     fn normal_m_creates_mr() {
         let app = test_app();
         let action = app.handle_key(make_key(KeyCode::Char('m')));
@@ -4487,11 +4495,11 @@ mod tests {
     }
 
     #[test]
-    fn confirmmerge_q_cancels() {
+    fn confirmmerge_q_does_not_cancel() {
         let mut app = test_app();
         app.mode = confirm_merge_mode();
         let action = app.handle_key(make_key(KeyCode::Char('q')));
-        assert!(matches!(action, Some(Action::CancelMode)));
+        assert!(action.is_none());
     }
 
     #[test]
@@ -6628,29 +6636,29 @@ mod tests {
     }
 
     #[test]
-    fn confirmdelete_q_cancels() {
+    fn confirmdelete_q_does_not_cancel() {
         let mut app = test_app();
         app.agents = vec![mock_agent("a")];
         app.update(Action::StartDelete);
         let action = app.handle_key(make_key(KeyCode::Char('q')));
-        assert!(matches!(action, Some(Action::CancelMode)));
+        assert!(action.is_none());
     }
 
     #[test]
-    fn newagent_branchlist_q_cancels() {
+    fn newagent_branchlist_q_does_not_cancel() {
         let mut app = test_app_in_new_agent_mode();
         if let Mode::NewAgent { focus, .. } = &mut app.mode {
             *focus = NewAgentFocus::BranchList;
         }
         let action = app.handle_key(make_key(KeyCode::Char('q')));
-        assert!(matches!(action, Some(Action::CancelMode)));
+        assert!(action.is_none());
     }
 
     #[test]
-    fn newagent_prompt_q_cancels() {
+    fn newagent_prompt_q_does_not_cancel() {
         let app = test_app_in_new_agent_mode();
         let action = app.handle_key(make_key(KeyCode::Char('q')));
-        assert!(matches!(action, Some(Action::CancelMode)));
+        assert!(action.is_none());
     }
 
     #[test]
