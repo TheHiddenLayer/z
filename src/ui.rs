@@ -163,30 +163,30 @@ fn render_mr(mr: &MergeRequest) -> Vec<Line<'static>> {
     lines
 }
 
-fn mr_status_hints(snapshot: Option<&MrSnapshot>) -> Line<'static> {
-    match snapshot {
+fn selected_agent_keymap_items(app: &App) -> Vec<(&'static str, &'static str)> {
+    let mut items = match app.selected_mr_snapshot() {
         Some(MrSnapshot::Ready(mr)) => match classify(Some(mr)).kind {
-            MrDisplayKind::Ready => footer_hint(&[
-                ("m", "MR"),
-                ("M", "merge"),
-                ("o", "open"),
-                ("r", "rebase"),
-                ("tab", "preview"),
-            ]),
-            MrDisplayKind::Blocked | MrDisplayKind::Draft | MrDisplayKind::Open => footer_hint(&[
-                ("f", "make-ready"),
-                ("r", "rebase"),
-                ("v", "review-fix"),
-                ("o", "open"),
-                ("tab", "preview"),
-            ]),
-            _ => footer_hint(&[("m", "MR"), ("o", "open"), ("tab", "preview")]),
+            MrDisplayKind::Ready => vec![("M", "merge"), ("o", "open"), ("r", "rebase")],
+            MrDisplayKind::Blocked | MrDisplayKind::Draft | MrDisplayKind::Open => {
+                vec![
+                    ("f", "make-ready"),
+                    ("r", "rebase"),
+                    ("v", "review-fix"),
+                    ("o", "open"),
+                ]
+            }
+            _ => vec![("m", "MR"), ("o", "open")],
         },
-        Some(MrSnapshot::Error(_)) => footer_hint(&[("m", "retry"), ("tab", "preview")]),
-        None | Some(MrSnapshot::Missing) => {
-            footer_hint(&[("m", "create MR"), ("tab", "preview"), ("?", "help")])
-        }
-    }
+        Some(MrSnapshot::Error(_)) => vec![("m", "retry"), ("d", "delete")],
+        None | Some(MrSnapshot::Missing) => vec![("m", "create MR"), ("d", "delete")],
+    };
+    let preview_label = match app.preview_mode {
+        PreviewMode::Terminal => "MR",
+        PreviewMode::MergeRequest => "session",
+    };
+    items.push(("tab", preview_label));
+    items.push(("?", "hide"));
+    items
 }
 
 fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
@@ -334,28 +334,16 @@ fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    if let Mode::NewAgent { focus, .. } = &app.mode {
-        let line = crate::new_agent_panel::wizard_hint(focus);
-        frame.render_widget(Paragraph::new(line), area);
-        return;
-    }
     let line = if let Some(msg) = &app.status_message {
         Line::from(Span::styled(msg.as_str(), Style::default().fg(DIM)))
-    } else if app.help_visible {
-        footer_hint(&[
-            ("↑/k", "up"),
-            ("↓/j", "down"),
-            ("n", "new"),
-            ("a", "attach"),
-            ("x", "stop"),
-            ("d", "delete"),
-            ("?", "hide"),
-            ("q", "quit"),
-        ])
-    } else if app.selected_agent().is_some() {
-        mr_status_hints(app.selected_mr_snapshot())
-    } else {
+    } else if !app.keymap_visible {
         Line::from(Span::styled("?", Style::default().fg(DIM)))
+    } else if let Mode::NewAgent { focus, .. } = &app.mode {
+        crate::new_agent_panel::wizard_hint(focus)
+    } else if app.selected_agent().is_some() {
+        footer_hint(&selected_agent_keymap_items(app))
+    } else {
+        footer_hint(&[("n", "new"), ("?", "hide"), ("q", "quit")])
     };
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -553,6 +541,16 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
+    fn status_row_text(app: &App) -> String {
+        let buffer = render_app_buffer(app);
+        let y = buffer.area().height.saturating_sub(2);
+        (0..buffer.area().width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
     fn find_text_pos(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
         let needle_width = needle.chars().count() as u16;
         for y in 0..buffer.area().height {
@@ -616,6 +614,82 @@ mod tests {
             source_branch: source_branch.to_string(),
             target_branch: None,
         }
+    }
+
+    #[test]
+    fn hidden_normal_keymap_only_shows_question_mark_toggle() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+
+        let status = status_row_text(&app);
+
+        assert_eq!(status, "?");
+    }
+
+    #[test]
+    fn visible_normal_keymap_shows_context_actions_and_hide_toggle() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        app.keymap_visible = true;
+
+        let status = status_row_text(&app);
+
+        assert!(
+            status.contains("m create MR"),
+            "visible keymap should include selected-row MR action:\n{status}"
+        );
+        assert!(
+            status.contains("? hide"),
+            "visible keymap should always include the question-mark hide toggle:\n{status}"
+        );
+    }
+
+    #[test]
+    fn visible_normal_keymap_names_tab_preview_destination() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        app.keymap_visible = true;
+
+        let status = status_row_text(&app);
+        assert!(
+            status.contains("tab MR"),
+            "terminal preview should advertise tab as switching to MR preview:\n{status}"
+        );
+
+        app.preview_mode = PreviewMode::MergeRequest;
+        let status = status_row_text(&app);
+        assert!(
+            status.contains("tab session"),
+            "MR preview should advertise tab as switching back to the agent session:\n{status}"
+        );
+    }
+
+    #[test]
+    fn hidden_new_agent_keymap_only_shows_question_mark_toggle() {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+
+        let status = status_row_text(&app);
+
+        assert_eq!(status, "?");
+    }
+
+    #[test]
+    fn visible_new_agent_keymap_shows_wizard_actions_and_hide_toggle() {
+        let mut app = test_app();
+        app.keymap_visible = true;
+        app.update(Action::StartNewAgent);
+
+        let status = status_row_text(&app);
+
+        assert!(
+            status.contains("tab next"),
+            "visible wizard keymap should include current wizard actions:\n{status}"
+        );
+        assert!(
+            status.contains("? hide"),
+            "visible wizard keymap should include the global hide toggle:\n{status}"
+        );
     }
 
     #[test]

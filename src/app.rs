@@ -52,7 +52,7 @@ pub enum Action {
     StartNewAgent,
     StartDelete,
     CancelMode,
-    ToggleHelp,
+    ToggleKeymap,
 
     // New agent flow
     PickerNext,
@@ -463,7 +463,8 @@ pub struct App {
     pub preview_content: Option<String>,
     pub spinner_frame: usize,
     pub dirty: bool,
-    pub help_visible: bool,
+    /// Controls the optional bottom keymap legend across app modes.
+    pub keymap_visible: bool,
     pub preview_mode: PreviewMode,
     pub mr_snapshots: HashMap<MrKey, MrSnapshot>,
 
@@ -489,7 +490,7 @@ impl App {
             preview_content: None,
             spinner_frame: 0,
             dirty: true, // render on first frame
-            help_visible: false,
+            keymap_visible: false,
             preview_mode: PreviewMode::Terminal,
             mr_snapshots: HashMap::new(),
             discover_pending: false,
@@ -751,8 +752,8 @@ impl App {
             Action::CancelMode => {
                 self.mode = Mode::Normal;
             }
-            Action::ToggleHelp => {
-                self.help_visible = !self.help_visible;
+            Action::ToggleKeymap => {
+                self.keymap_visible = !self.keymap_visible;
             }
 
             // --- Pickers ---
@@ -2240,6 +2241,10 @@ impl App {
             return None;
         }
 
+        if matches!(key.code, KeyCode::Char('?')) {
+            return Some(Action::ToggleKeymap);
+        }
+
         match &self.mode {
             Mode::Normal => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
@@ -2259,7 +2264,6 @@ impl App {
                     .filter(|a| a.status.has_session())
                     .map(|a| Action::KillSession(a.session_name.clone())),
                 KeyCode::Char('d') => Some(Action::StartDelete),
-                KeyCode::Char('?') => Some(Action::ToggleHelp),
                 _ => None,
             },
             Mode::ConfirmDelete => match key.code {
@@ -4255,16 +4259,26 @@ mod tests {
     }
 
     #[test]
-    fn question_mark_toggles_help_in_normal_mode() {
+    fn question_mark_toggles_keymap_in_normal_mode() {
         let mut app = test_app();
-        assert!(!app.help_visible);
+        assert!(!app.keymap_visible);
         let action = app.handle_key(make_key(KeyCode::Char('?'))).unwrap();
-        assert!(matches!(action, Action::ToggleHelp));
+        assert!(matches!(action, Action::ToggleKeymap));
         app.update(action);
-        assert!(app.help_visible);
+        assert!(app.keymap_visible);
         let action = app.handle_key(make_key(KeyCode::Char('?'))).unwrap();
         app.update(action);
-        assert!(!app.help_visible);
+        assert!(!app.keymap_visible);
+    }
+
+    #[test]
+    fn question_mark_toggles_keymap_in_new_agent_mode() {
+        let mut app = test_app();
+        app.update(Action::StartNewAgent);
+
+        let action = app.handle_key(make_key(KeyCode::Char('?'))).unwrap();
+
+        assert!(matches!(action, Action::ToggleKeymap));
     }
 
     #[test]
