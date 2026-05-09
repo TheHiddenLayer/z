@@ -1,5 +1,6 @@
 use crate::app::{App, BranchMode, Mode, NewAgentFocus, NewAgentSource, RemoteList};
 use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
+use crate::source_picker::{filtered_issue_indices, filtered_mr_indices, issue_label, mr_label};
 use crate::style::{DIM, TEXT, footer_hint};
 use ratatui::{
     buffer::Buffer,
@@ -206,39 +207,6 @@ fn render_divider(area: Rect, buf: &mut Buffer) {
 
 fn render_remote_status(message: &str, area: Rect, buf: &mut Buffer) {
     Paragraph::new(Span::styled(message.to_string(), Style::default().fg(DIM))).render(area, buf);
-}
-
-fn matches_source_query(label: &str, query: &str) -> bool {
-    let trimmed = query.trim();
-    trimmed.is_empty()
-        || label
-            .to_ascii_lowercase()
-            .contains(&trimmed.to_ascii_lowercase())
-}
-
-fn issue_label(issue: &GitlabIssue) -> String {
-    format!("#{} {}", issue.iid, issue.title)
-}
-
-fn mr_label(mr: &GitlabMergeRequest) -> String {
-    format!("!{} {} {}", mr.iid, mr.title, mr.source_branch)
-}
-
-fn filtered_issue_indices(issues: &[GitlabIssue], query: &str) -> Vec<usize> {
-    issues
-        .iter()
-        .enumerate()
-        .filter_map(|(index, issue)| {
-            matches_source_query(&issue_label(issue), query).then_some(index)
-        })
-        .collect()
-}
-
-fn filtered_mr_indices(mrs: &[GitlabMergeRequest], query: &str) -> Vec<usize> {
-    mrs.iter()
-        .enumerate()
-        .filter_map(|(index, mr)| matches_source_query(&mr_label(mr), query).then_some(index))
-        .collect()
 }
 
 fn issue_items(issues: &RemoteList<GitlabIssue>, query: &str) -> ListPayload {

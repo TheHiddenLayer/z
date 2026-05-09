@@ -4,10 +4,11 @@ use crate::gitlab::{MergeRequest, MrDisplayKind, MrState, classify};
 use crate::new_agent_panel::NewAgentPanelWidget;
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Constraint, Layout, Margin, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 
 use crate::style::{
@@ -214,97 +215,211 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(&widget, area);
 }
 
-fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
-    let w = area.width as usize;
-    let dash_style = Style::default().fg(DIM);
+#[derive(Clone, Copy)]
+struct SeparatorPosition {
+    color: Color,
+    selected: bool,
+}
 
-    let label_spans = if let Some(agent) = app.selected_agent() {
+#[derive(Clone, Copy)]
+enum SeparatorLabel<'a> {
+    Branch { branch: &'a str },
+    Drifted { slug: &'a str, branch: &'a str },
+}
+
+struct SeparatorWidget<'a> {
+    label: Option<SeparatorLabel<'a>>,
+    positions: &'a [SeparatorPosition],
+    has_new_agent_candidate: bool,
+}
+
+impl<'a> SeparatorWidget<'a> {
+    const fn new() -> Self {
+        Self {
+            label: None,
+            positions: &[],
+            has_new_agent_candidate: false,
+        }
+    }
+
+    const fn label(mut self, label: SeparatorLabel<'a>) -> Self {
+        self.label = Some(label);
+        self
+    }
+
+    const fn positions(mut self, positions: &'a [SeparatorPosition]) -> Self {
+        self.positions = positions;
+        self
+    }
+
+    const fn new_agent_candidate(mut self, has_candidate: bool) -> Self {
+        self.has_new_agent_candidate = has_candidate;
+        self
+    }
+
+    fn label_spans(&self) -> Option<Vec<Span<'a>>> {
         let dim_style = Style::default().fg(DIM);
         let label_style = Style::default().fg(TEXT);
 
-        let drifted = agent.slug != agent.branch.replace('/', "-");
         let mut spans = vec![Span::styled(" ", dim_style)];
-        if drifted {
-            spans.push(Span::styled(agent.slug.as_str(), label_style));
-            spans.push(drift_arrow());
-            spans.push(Span::styled(
-                agent.branch.as_str(),
-                label_style.add_modifier(Modifier::ITALIC),
-            ));
-        } else {
-            spans.push(Span::styled(agent.branch.as_str(), label_style));
+        match self.label? {
+            SeparatorLabel::Branch { branch } => {
+                spans.push(Span::styled(branch, label_style));
+            }
+            SeparatorLabel::Drifted { slug, branch } => {
+                spans.push(Span::styled(slug, label_style));
+                spans.push(drift_arrow());
+                spans.push(Span::styled(
+                    branch,
+                    label_style.add_modifier(Modifier::ITALIC),
+                ));
+            }
         }
         spans.push(Span::styled(" ", dim_style));
         Some(spans)
-    } else {
-        None
-    };
+    }
 
-    let total = app.agents.len();
-    let has_new_agent_candidate = matches!(app.mode, Mode::NewAgent { .. });
-    let position_spans: Option<Vec<Span>> = if total > 0 || has_new_agent_candidate {
+    fn position_spans(&self) -> Option<Vec<Span<'a>>> {
+        if self.positions.is_empty() && !self.has_new_agent_candidate {
+            return None;
+        }
+
         let dim_style = Style::default().fg(DIM);
         let mut spans = vec![Span::styled(" ", dim_style)];
-        for (i, agent) in app.agents.iter().enumerate() {
-            let glyph = if i == app.selected {
+        for (i, position) in self.positions.iter().enumerate() {
+            let glyph = if position.selected {
                 "\u{25CF}"
             } else {
                 "\u{2022}"
             };
-            let style = Style::default().fg(status_color(agent));
-            spans.push(Span::styled(glyph, style));
-            if i + 1 < total {
+            spans.push(Span::styled(glyph, Style::default().fg(position.color)));
+            if i + 1 < self.positions.len() {
                 spans.push(Span::styled(" ", dim_style));
             }
         }
-        if has_new_agent_candidate {
-            if total > 0 {
+        if self.has_new_agent_candidate {
+            if !self.positions.is_empty() {
                 spans.push(Span::styled(" ", dim_style));
             }
             spans.push(Span::styled("\u{25E6}", dim_style));
         }
         spans.push(Span::styled(" ", dim_style));
         Some(spans)
-    } else {
-        None
-    };
+    }
 
-    let sep = match (label_spans, position_spans) {
-        (Some(label), Some(pos)) => {
-            let label_len: usize = label.iter().map(|s| s.width()).sum();
-            let pos_len: usize = pos.iter().map(|s| s.width()).sum();
-            let left_dashes = 3;
-            let right_dashes = 3;
-            let middle_dashes = w.saturating_sub(left_dashes + pos_len + label_len + right_dashes);
-            let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
-            spans.extend(pos);
-            spans.push(Span::styled("\u{2500}".repeat(middle_dashes), dash_style));
-            spans.extend(label);
-            spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
-            Line::from(spans)
-        }
-        (Some(label), None) => {
-            let label_len: usize = label.iter().map(|s| s.width()).sum();
-            let right_dashes = 3;
-            let left_dashes = w.saturating_sub(label_len + right_dashes);
-            let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
-            spans.extend(label);
-            spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
-            Line::from(spans)
-        }
-        (None, Some(pos)) => {
-            let pos_len: usize = pos.iter().map(|s| s.width()).sum();
-            let left_dashes = 3;
-            let right_dashes = w.saturating_sub(left_dashes + pos_len);
-            let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
-            spans.extend(pos);
-            spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
-            Line::from(spans)
-        }
-        (None, None) => Line::from(Span::styled("\u{2500}".repeat(w), dash_style)),
-    };
+    fn line(&self, width: usize) -> Line<'a> {
+        let dash_style = Style::default().fg(DIM);
+        let label_spans = self.label_spans();
+        let position_spans = self.position_spans();
 
-    frame.render_widget(Paragraph::new(sep), area);
+        match (label_spans, position_spans) {
+            (Some(label), Some(pos)) => {
+                let label_len: usize = label.iter().map(|s| s.width()).sum();
+                let pos_len: usize = pos.iter().map(|s| s.width()).sum();
+                let left_dashes = 3;
+                let right_dashes = 3;
+                let middle_dashes =
+                    width.saturating_sub(left_dashes + pos_len + label_len + right_dashes);
+                let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
+                spans.extend(pos);
+                spans.push(Span::styled("\u{2500}".repeat(middle_dashes), dash_style));
+                spans.extend(label);
+                spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
+                Line::from(spans)
+            }
+            (Some(label), None) => {
+                let label_len: usize = label.iter().map(|s| s.width()).sum();
+                let right_dashes = 3;
+                let left_dashes = width.saturating_sub(label_len + right_dashes);
+                let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
+                spans.extend(label);
+                spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
+                Line::from(spans)
+            }
+            (None, Some(pos)) => {
+                let pos_len: usize = pos.iter().map(|s| s.width()).sum();
+                let left_dashes = 3;
+                let right_dashes = width.saturating_sub(left_dashes + pos_len);
+                let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
+                spans.extend(pos);
+                spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
+                Line::from(spans)
+            }
+            (None, None) => Line::from(Span::styled("\u{2500}".repeat(width), dash_style)),
+        }
+    }
+}
+
+impl Widget for &SeparatorWidget<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        Paragraph::new(self.line(area.width as usize)).render(area, buf);
+    }
+}
+
+fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
+    let label = app.selected_agent().map(|agent| {
+        let drifted = agent.slug != agent.branch.replace('/', "-");
+        if drifted {
+            SeparatorLabel::Drifted {
+                slug: agent.slug.as_str(),
+                branch: agent.branch.as_str(),
+            }
+        } else {
+            SeparatorLabel::Branch {
+                branch: agent.branch.as_str(),
+            }
+        }
+    });
+    let positions: Vec<SeparatorPosition> = app
+        .agents
+        .iter()
+        .enumerate()
+        .map(|(i, agent)| SeparatorPosition {
+            color: status_color(agent),
+            selected: i == app.selected,
+        })
+        .collect();
+    let mut widget = SeparatorWidget::new()
+        .positions(&positions)
+        .new_agent_candidate(matches!(app.mode, Mode::NewAgent { .. }));
+    if let Some(label) = label {
+        widget = widget.label(label);
+    }
+
+    frame.render_widget(&widget, area);
+}
+
+struct ModalFrame<'a> {
+    title: &'a str,
+}
+
+impl<'a> ModalFrame<'a> {
+    const fn new(title: &'a str) -> Self {
+        Self { title }
+    }
+
+    fn block(&self) -> Block<'static> {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(DIM))
+            .title(modal_title(self.title))
+    }
+
+    fn inner(&self, area: Rect) -> Rect {
+        self.block().inner(area)
+    }
+
+    fn render(&self, frame: &mut Frame, area: Rect) -> Rect {
+        let inner = self.inner(area);
+        frame.render_widget(self, area);
+        inner
+    }
+}
+
+impl Widget for &ModalFrame<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.block().render(area, buf);
+    }
 }
 
 fn tail_lines(s: &str, n: usize) -> &str {
@@ -349,12 +464,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(DIM))
-        .title(modal_title("Delete Agent"));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = ModalFrame::new("Delete Agent").render(frame, area);
 
     let agent = app.selected_agent();
     let name = agent.map(|a| a.branch.as_str()).unwrap_or("?");
@@ -409,12 +519,7 @@ fn draw_delete_modal(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_merge_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(DIM))
-        .title(modal_title("Merge MR"));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = ModalFrame::new("Merge MR").render(frame, area);
 
     let Mode::ConfirmMerge {
         id_or_branch,
@@ -551,6 +656,16 @@ mod tests {
             .to_string()
     }
 
+    fn render_widget_text<W: ratatui::widgets::Widget>(
+        widget: W,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
+        widget.render(*buffer.area(), &mut buffer);
+        buffer_text(&buffer)
+    }
+
     fn find_text_pos(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
         let needle_width = needle.chars().count() as u16;
         for y in 0..buffer.area().height {
@@ -645,6 +760,32 @@ mod tests {
     }
 
     #[test]
+    fn separator_widget_renders_positions_label_and_dashes_from_props() {
+        let positions = [
+            SeparatorPosition {
+                color: OK,
+                selected: true,
+            },
+            SeparatorPosition {
+                color: DIM,
+                selected: false,
+            },
+        ];
+        let widget = SeparatorWidget::new()
+            .positions(&positions)
+            .label(SeparatorLabel::Branch {
+                branch: "feature-x",
+            });
+
+        let text = render_widget_text(&widget, 24, 1);
+
+        assert_eq!(
+            text,
+            "\u{2500}\u{2500}\u{2500} \u{25CF} \u{2022} \u{2500}\u{2500} feature-x \u{2500}\u{2500}\u{2500}"
+        );
+    }
+
+    #[test]
     fn visible_normal_keymap_names_tab_preview_destination() {
         let mut app = test_app();
         app.agents = vec![mock_agent("fix-auth")];
@@ -690,6 +831,23 @@ mod tests {
             status.contains("? hide"),
             "visible wizard keymap should include the global hide toggle:\n{status}"
         );
+    }
+
+    #[test]
+    fn modal_frame_renders_shared_chrome_and_reports_inner_rect() {
+        let modal = ModalFrame::new("Merge MR");
+        let area = Rect::new(0, 0, 20, 5);
+        let mut buffer = Buffer::empty(area);
+
+        let inner = modal.inner(area);
+        ratatui::widgets::Widget::render(&modal, area, &mut buffer);
+
+        assert_eq!(inner, Rect::new(1, 1, 18, 3));
+        assert_eq!(buffer[(0, 0)].symbol(), "\u{250c}");
+        assert_eq!(buffer[(19, 0)].symbol(), "\u{2510}");
+        assert_eq!(buffer[(0, 4)].symbol(), "\u{2514}");
+        assert_eq!(buffer[(19, 4)].symbol(), "\u{2518}");
+        assert!(buffer_text(&buffer).contains(" Merge MR "));
     }
 
     #[test]

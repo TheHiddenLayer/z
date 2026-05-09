@@ -1,7 +1,7 @@
 use crate::agent::{self, Agent, AgentStatus};
 use crate::config::Config;
 use crate::gitlab::{GitlabIssue, GitlabMergeRequest, MergeRequest, MrDisplayKind, classify};
-use crate::notifications;
+use crate::source_picker::{filtered_issue_indices, filtered_mr_indices};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -218,41 +218,6 @@ fn generate_branch_name(branches: &[String], date_str: &str) -> String {
     format!("{prefix}{}", max_n + 1)
 }
 
-// wired by Task 11 search/navigation
-#[allow(dead_code)]
-fn matches_query(haystack: &str, query: &str) -> bool {
-    haystack
-        .to_ascii_lowercase()
-        .contains(&query.to_ascii_lowercase())
-}
-
-// wired by Task 11 search/navigation
-#[allow(dead_code)]
-fn filtered_issue_indices(issues: &[GitlabIssue], query: &str) -> Vec<usize> {
-    let trimmed = query.trim();
-    issues
-        .iter()
-        .enumerate()
-        .filter_map(|(i, issue)| {
-            let label = format!("#{} {}", issue.iid, issue.title);
-            (trimmed.is_empty() || matches_query(&label, trimmed)).then_some(i)
-        })
-        .collect()
-}
-
-// wired by Task 11 search/navigation
-#[allow(dead_code)]
-fn filtered_mr_indices(mrs: &[GitlabMergeRequest], query: &str) -> Vec<usize> {
-    let trimmed = query.trim();
-    mrs.iter()
-        .enumerate()
-        .filter_map(|(i, mr)| {
-            let label = format!("!{} {} {}", mr.iid, mr.title, mr.source_branch);
-            (trimmed.is_empty() || matches_query(&label, trimmed)).then_some(i)
-        })
-        .collect()
-}
-
 fn select_issue_by_index(
     issues: &[GitlabIssue],
     index: usize,
@@ -408,6 +373,10 @@ pub enum Command {
     },
     EditPrompt {
         initial_prompt: String,
+    },
+    Notify {
+        title: String,
+        body: String,
     },
 }
 
@@ -1580,7 +1549,10 @@ impl App {
                     agent.status = AgentStatus::Error(error.clone());
                 }
                 if self.should_notify() {
-                    notifications::fire(&format!("{label} failed"), &error);
+                    cmds.push(Command::Notify {
+                        title: format!("{label} failed"),
+                        body: error.clone(),
+                    });
                 }
                 self.status_message = Some(format!("Failed: {}", error));
             }
@@ -1595,7 +1567,10 @@ impl App {
                     }
                 }
                 if self.should_notify() {
-                    notifications::fire(&format!("{label} failed"), &error);
+                    cmds.push(Command::Notify {
+                        title: format!("{label} failed"),
+                        body: error.clone(),
+                    });
                 }
                 self.status_message = Some(format!("Failed: {}", error));
             }
@@ -1617,7 +1592,10 @@ impl App {
                     agent.status = AgentStatus::Error(error.clone());
                 }
                 if self.should_notify() {
-                    notifications::fire(&format!("{label} failed"), &error);
+                    cmds.push(Command::Notify {
+                        title: format!("{label} failed"),
+                        body: error.clone(),
+                    });
                 }
                 self.status_message = Some(format!("Failed: {}", error));
             }
@@ -2096,10 +2074,10 @@ impl App {
                         && agent.seen_activity_since_seed;
                     if just_finished {
                         if notify {
-                            notifications::fire(
-                                &format!("{}/{}", agent.repo_name, agent.slug),
-                                "agent finished working",
-                            );
+                            cmds.push(Command::Notify {
+                                title: format!("{}/{}", agent.repo_name, agent.slug),
+                                body: "agent finished working".into(),
+                            });
                         }
                         // Reset the activity latch so a single-capture blip
                         // arriving after this edge can't re-fire the
@@ -2547,14 +2525,22 @@ mod tests {
     fn agent_failed_updates_status() {
         let mut app = test_app();
         app.agents = vec![mock_agent_creating("fix-auth")];
-        app.update(Action::AgentFailed {
+        app.config.notifications.enabled = true;
+        app.config.notifications.only_when_unfocused = false;
+
+        let cmds = app.update(Action::AgentFailed {
             session: "z-myapp-fix-auth".into(),
             error: "already exists".into(),
         });
+
         assert!(matches!(
             app.agents[0].status,
             crate::agent::AgentStatus::Error(_)
         ));
+        assert!(
+            has_notify_command(&cmds, "myapp/fix-auth failed", "already exists"),
+            "expected failure to return Command::Notify, got {cmds:?}"
+        );
     }
 
     #[test]
@@ -2563,14 +2549,24 @@ mod tests {
         let mut agent = mock_agent_creating("fix/remote-shell-profiles");
         agent.worktree_path = PathBuf::new();
         app.agents = vec![agent];
+        app.config.notifications.enabled = true;
+        app.config.notifications.only_when_unfocused = false;
 
-        app.update(Action::AgentSetupFailed {
+        let cmds = app.update(Action::AgentSetupFailed {
             session: "z-myapp-fix-remote-shell-profiles".into(),
             error: "fetch failed".into(),
         });
 
         assert!(app.agents.is_empty());
         assert_eq!(app.status_message.as_deref(), Some("Failed: fetch failed"));
+        assert!(
+            has_notify_command(
+                &cmds,
+                "myapp/fix-remote-shell-profiles failed",
+                "fetch failed"
+            ),
+            "expected setup failure to return Command::Notify, got {cmds:?}"
+        );
     }
 
     #[test]
@@ -2623,8 +2619,10 @@ mod tests {
         agent.worktree_path = PathBuf::new();
         app.agents = vec![agent];
         let worktree_path = PathBuf::from("/tmp/myapp-worktrees/fix/remote-shell-profiles");
+        app.config.notifications.enabled = true;
+        app.config.notifications.only_when_unfocused = false;
 
-        app.update(Action::AgentSessionFailed {
+        let cmds = app.update(Action::AgentSessionFailed {
             session: "z-myapp-fix-remote-shell-profiles".into(),
             error: "tmux failed".into(),
             worktree_path: worktree_path.clone(),
@@ -2637,6 +2635,14 @@ mod tests {
         ));
         assert_eq!(app.agents[0].worktree_path, worktree_path);
         assert_eq!(app.status_message.as_deref(), Some("Failed: tmux failed"));
+        assert!(
+            has_notify_command(
+                &cmds,
+                "myapp/fix-remote-shell-profiles failed",
+                "tmux failed"
+            ),
+            "expected session failure to return Command::Notify, got {cmds:?}"
+        );
     }
 
     #[test]
@@ -3014,13 +3020,55 @@ mod tests {
         a.was_spinner_visible = true; // was showing spinner last tick
         app.agents = vec![a];
 
-        // (Can't easily assert "no notification fired" without mocking
-        // notifications::fire. Instead, observable post-Tick state:
-        // was_spinner_visible should now be false. The actual gating is
-        // in the implementation; this test ensures was_spinner_visible
-        // is correctly updated even when notifications would be suppressed.)
-        app.update(Action::Tick);
+        let cmds = app.update(Action::Tick);
+        assert!(
+            !has_any_notify_command(&cmds),
+            "freshly-discovered idle agent should not return Notify command, got {cmds:?}"
+        );
         assert!(!app.agents[0].was_spinner_visible);
+    }
+
+    #[test]
+    fn notification_edge_returns_notify_command_when_enabled_and_suppresses_when_gated() {
+        let mut app = done_edge_app();
+        app.config.notifications.enabled = true;
+        app.config.notifications.only_when_unfocused = true;
+        app.focused = false;
+
+        let cmds = app.update(Action::Tick);
+
+        assert!(
+            has_notify_command(&cmds, "myapp/fix-auth", "agent finished working"),
+            "expected done edge to return Command::Notify, got {cmds:?}"
+        );
+
+        let mut app = done_edge_app();
+        app.focused = false;
+        let cmds = app.update(Action::Tick);
+        assert!(
+            !has_any_notify_command(&cmds),
+            "disabled notifications should suppress Notify command, got {cmds:?}"
+        );
+
+        let mut app = done_edge_app();
+        app.config.notifications.enabled = true;
+        app.config.notifications.only_when_unfocused = true;
+        app.focused = true;
+        let cmds = app.update(Action::Tick);
+        assert!(
+            !has_any_notify_command(&cmds),
+            "focused terminal should suppress Notify command, got {cmds:?}"
+        );
+
+        let mut app = done_edge_app();
+        app.config.notifications.enabled = true;
+        app.config.notifications.only_when_unfocused = false;
+        app.focused = true;
+        let cmds = app.update(Action::Tick);
+        assert!(
+            has_notify_command(&cmds, "myapp/fix-auth", "agent finished working"),
+            "disabled focus gating should allow Notify command, got {cmds:?}"
+        );
     }
 
     #[test]
@@ -3156,6 +3204,32 @@ mod tests {
         let mut a = mock_agent(branch);
         a.status = crate::agent::AgentStatus::Creating;
         a
+    }
+
+    fn done_edge_app() -> App {
+        let mut app = test_app();
+        let mut a = mock_agent("fix-auth");
+        a.status = AgentStatus::Running;
+        a.last_pane_hash = Some(0x1);
+        a.quiet_captures = crate::agent::QUIET_THRESHOLD;
+        a.seen_activity_since_seed = true;
+        a.was_spinner_visible = true;
+        app.agents = vec![a];
+        app
+    }
+
+    fn has_notify_command(cmds: &[Command], expected_title: &str, expected_body: &str) -> bool {
+        cmds.iter().any(|cmd| {
+            matches!(
+                cmd,
+                Command::Notify { title, body }
+                    if title == expected_title && body == expected_body
+            )
+        })
+    }
+
+    fn has_any_notify_command(cmds: &[Command]) -> bool {
+        cmds.iter().any(|cmd| matches!(cmd, Command::Notify { .. }))
     }
 
     fn confirm_merge_mode() -> Mode {
