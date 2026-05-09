@@ -648,6 +648,29 @@ impl App {
             .or_else(|| self.agents.iter().position(|a| a.session_name == session))
     }
 
+    fn agent_index_for_selection(
+        agents: &[Agent],
+        session: &str,
+        worktree_path: Option<&PathBuf>,
+        optimistic_setup: bool,
+    ) -> Option<usize> {
+        let by_optimistic = optimistic_setup
+            .then(|| {
+                agents
+                    .iter()
+                    .position(|a| a.session_name == session && Self::is_optimistic_setup_agent(a))
+            })
+            .flatten();
+        let by_path = worktree_path.and_then(|path| {
+            agents
+                .iter()
+                .position(|a| !a.worktree_path.as_os_str().is_empty() && &a.worktree_path == path)
+        });
+        by_optimistic
+            .or(by_path)
+            .or_else(|| agents.iter().position(|a| a.session_name == session))
+    }
+
     /// Core state machine. Returns Commands for side effects to be executed by the caller.
     pub fn update(&mut self, action: Action) -> Vec<Command> {
         let mut cmds = vec![];
@@ -1314,6 +1337,8 @@ impl App {
                             });
                         }
                     }
+                    self.selected = self.agents.len().saturating_sub(1);
+                    self.preview_content = None;
                     self.mode = Mode::Normal;
                 } else if let Some(status) = status_on_none {
                     self.status_message = Some(status);
@@ -1603,6 +1628,15 @@ impl App {
                 self.status_message = Some(format!("Delete {branch}: {error}"));
             }
             Action::AgentsRefreshed(mut new_agents) => {
+                let selected_before_refresh = self.selected_agent().map(|agent| {
+                    (
+                        agent.session_name.clone(),
+                        (!agent.worktree_path.as_os_str().is_empty())
+                            .then(|| agent.worktree_path.clone()),
+                        Self::is_optimistic_setup_agent(agent),
+                    )
+                });
+
                 self.discover_pending = false;
                 self.pending_lifecycle_worktrees
                     .retain(|path| !new_agents.iter().any(|a| a.worktree_path == *path));
@@ -1667,7 +1701,19 @@ impl App {
                 }
                 self.agents = new_agents;
                 cmds.extend(self.schedule_mr_refresh());
-                if self.selected >= self.agents.len() && !self.agents.is_empty() {
+                if let Some((session, worktree_path, optimistic_setup)) = selected_before_refresh
+                    && let Some(index) = Self::agent_index_for_selection(
+                        &self.agents,
+                        &session,
+                        worktree_path.as_ref(),
+                        optimistic_setup,
+                    )
+                {
+                    self.selected = index;
+                }
+                if self.agents.is_empty() {
+                    self.selected = 0;
+                } else if self.selected >= self.agents.len() {
                     self.selected = self.agents.len() - 1;
                 }
             }
@@ -2408,6 +2454,20 @@ mod tests {
         app.update(Action::AgentsRefreshed(agents));
         assert_eq!(app.agents.len(), 1);
         assert_eq!(app.agents[0].branch, "fix-auth");
+    }
+
+    #[test]
+    fn agents_refreshed_keeps_selection_on_same_agent_after_reorder() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("alpha"), mock_agent("beta")];
+        app.selected = 1;
+
+        app.update(Action::AgentsRefreshed(vec![
+            mock_agent("beta"),
+            mock_agent("alpha"),
+        ]));
+
+        assert_eq!(app.agents[app.selected].branch, "beta");
     }
 
     #[test]
@@ -4511,6 +4571,16 @@ mod tests {
             }
             other => panic!("expected CreateAgent, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn new_agent_confirm_selects_created_row() {
+        let mut app = test_app_in_new_agent_mode();
+        app.agents = vec![mock_agent("existing")];
+
+        let _ = app.update(Action::PickerConfirm);
+
+        assert_eq!(app.agents[app.selected].branch, "z-0409-1");
     }
 
     #[test]
