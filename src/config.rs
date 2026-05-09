@@ -269,7 +269,7 @@ resume = "codex resume --last"
         };
         let resolved = config.resolved_repos();
         assert!(!resolved[0].to_str().unwrap().contains('~'));
-        assert!(resolved[0].to_str().unwrap().ends_with("/src/myapp"));
+        assert!(resolved[0].ends_with(std::path::Path::new("src").join("myapp")));
     }
 
     #[test]
