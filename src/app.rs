@@ -148,6 +148,21 @@ pub enum Action {
     Quit,
 }
 
+#[derive(Debug, Clone)]
+struct AgentSelectionKey {
+    session_name: String,
+    worktree_path: Option<PathBuf>,
+    optimistic_setup: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AgentStatusOrder {
+    Error,
+    Completed,
+    InProgress,
+    Stopped,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MrKey {
     pub repo_path: PathBuf,
@@ -560,6 +575,66 @@ impl App {
         by_optimistic
             .or(by_path)
             .or_else(|| agents.iter().position(|a| a.session_name == session))
+    }
+
+    fn selected_agent_key(&self) -> Option<AgentSelectionKey> {
+        self.selected_agent().map(|agent| AgentSelectionKey {
+            session_name: agent.session_name.clone(),
+            worktree_path: (!agent.worktree_path.as_os_str().is_empty())
+                .then(|| agent.worktree_path.clone()),
+            optimistic_setup: Self::is_optimistic_setup_agent(agent),
+        })
+    }
+
+    fn restore_agent_selection(&mut self, selected_before: Option<AgentSelectionKey>) {
+        if let Some(key) = selected_before
+            && let Some(index) = Self::agent_index_for_selection(
+                &self.agents,
+                &key.session_name,
+                key.worktree_path.as_ref(),
+                key.optimistic_setup,
+            )
+        {
+            self.selected = index;
+        }
+
+        if self.agents.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.agents.len() {
+            self.selected = self.agents.len() - 1;
+        }
+    }
+
+    fn agent_status_order(agent: &Agent) -> AgentStatusOrder {
+        match &agent.status {
+            AgentStatus::Error(_) => AgentStatusOrder::Error,
+            AgentStatus::Stopped => AgentStatusOrder::Stopped,
+            _ if agent.shows_spinner() => AgentStatusOrder::InProgress,
+            _ => AgentStatusOrder::Completed,
+        }
+    }
+
+    fn sort_agents_by_status_preserving_selection(
+        &mut self,
+        selected_before: Option<AgentSelectionKey>,
+    ) -> bool {
+        let before: Vec<_> = self
+            .agents
+            .iter()
+            .map(|agent| (agent.session_name.clone(), agent.worktree_path.clone()))
+            .collect();
+
+        self.agents.sort_by_key(Self::agent_status_order);
+
+        let changed =
+            self.agents
+                .iter()
+                .zip(before.iter())
+                .any(|(agent, (session_name, worktree_path))| {
+                    agent.session_name != *session_name || agent.worktree_path != *worktree_path
+                });
+        self.restore_agent_selection(selected_before);
+        changed
     }
 
     /// Core state machine. Returns Commands for side effects to be executed by the caller.
@@ -1014,6 +1089,7 @@ impl App {
                 session,
                 worktree_path,
             } => {
+                let selected_before = self.selected_agent_key();
                 if let Some(index) = self.agent_lifecycle_target_index(&session) {
                     if Self::is_optimistic_setup_agent(&self.agents[index])
                         && !worktree_path.as_os_str().is_empty()
@@ -1027,13 +1103,16 @@ impl App {
                     // without waiting for the next AgentsRefreshed cycle.
                     agent.worktree_path = worktree_path;
                 }
+                self.sort_agents_by_status_preserving_selection(selected_before);
                 self.status_message = Some(format!("Ready: {}", branch));
             }
             Action::AgentFailed { session, error } => {
+                let selected_before = self.selected_agent_key();
                 let label = self.failure_label(&session);
                 if let Some(agent) = self.agents.iter_mut().find(|a| a.session_name == session) {
                     agent.status = AgentStatus::Error(error.clone());
                 }
+                self.sort_agents_by_status_preserving_selection(selected_before);
                 if self.should_notify() {
                     cmds.push(Command::Notify {
                         title: format!("{label} failed"),
@@ -1065,6 +1144,7 @@ impl App {
                 error,
                 worktree_path,
             } => {
+                let selected_before = self.selected_agent_key();
                 let label = self.failure_label(&session);
                 if let Some(index) = self.agent_lifecycle_target_index(&session) {
                     if Self::is_optimistic_setup_agent(&self.agents[index])
@@ -1077,6 +1157,7 @@ impl App {
                     agent.worktree_path = worktree_path;
                     agent.status = AgentStatus::Error(error.clone());
                 }
+                self.sort_agents_by_status_preserving_selection(selected_before);
                 if self.should_notify() {
                     cmds.push(Command::Notify {
                         title: format!("{label} failed"),
@@ -1089,14 +1170,7 @@ impl App {
                 self.status_message = Some(format!("Delete {branch}: {error}"));
             }
             Action::AgentsRefreshed(mut new_agents) => {
-                let selected_before_refresh = self.selected_agent().map(|agent| {
-                    (
-                        agent.session_name.clone(),
-                        (!agent.worktree_path.as_os_str().is_empty())
-                            .then(|| agent.worktree_path.clone()),
-                        Self::is_optimistic_setup_agent(agent),
-                    )
-                });
+                let selected_before_refresh = self.selected_agent_key();
 
                 self.discover_pending = false;
                 self.pending_lifecycle_worktrees
@@ -1161,22 +1235,8 @@ impl App {
                     }
                 }
                 self.agents = new_agents;
+                self.sort_agents_by_status_preserving_selection(selected_before_refresh);
                 cmds.extend(self.schedule_mr_refresh());
-                if let Some((session, worktree_path, optimistic_setup)) = selected_before_refresh
-                    && let Some(index) = Self::agent_index_for_selection(
-                        &self.agents,
-                        &session,
-                        worktree_path.as_ref(),
-                        optimistic_setup,
-                    )
-                {
-                    self.selected = index;
-                }
-                if self.agents.is_empty() {
-                    self.selected = 0;
-                } else if self.selected >= self.agents.len() {
-                    self.selected = self.agents.len() - 1;
-                }
                 self.capture_pending.retain(|session| {
                     self.agents
                         .iter()
@@ -1189,6 +1249,7 @@ impl App {
                 content_hash,
                 attached_count,
             } => {
+                let selected_before = self.selected_agent_key();
                 self.capture_pending.remove(&session_name);
                 // If this capture is for the currently-selected agent, the
                 // pane content doubles as preview material.
@@ -1255,6 +1316,9 @@ impl App {
                             }
                             self.dirty = true;
                         }
+                    }
+                    if self.sort_agents_by_status_preserving_selection(selected_before) {
+                        self.dirty = true;
                     }
                 }
             }
@@ -1538,6 +1602,7 @@ impl App {
             // --- System ---
             Action::Tick => {
                 self.spinner_frame = self.spinner_frame.wrapping_add(1);
+                let selected_before = self.selected_agent_key();
 
                 // Walk agents once: fire the spinner→done notification edge,
                 // update was_spinner_visible, and decide whether to repaint.
@@ -1575,6 +1640,9 @@ impl App {
                         any_change = true;
                     }
                     agent.was_spinner_visible = visible_now;
+                }
+                if self.sort_agents_by_status_preserving_selection(selected_before) {
+                    any_change = true;
                 }
                 if any_visible || any_change {
                     self.dirty = true;
@@ -1869,6 +1937,50 @@ mod tests {
     }
 
     #[test]
+    fn agents_refreshed_orders_sessions_by_display_status() {
+        let mut app = test_app();
+        let mut stopped = mock_agent("stopped");
+        stopped.status = AgentStatus::Stopped;
+        let mut running = mock_agent("running");
+        running.last_pane_hash = Some(0x1);
+        running.seen_activity_since_seed = true;
+        running.quiet_captures = 0;
+        let completed = mock_agent("completed");
+        let mut error = mock_agent("error");
+        error.status = AgentStatus::Error("boom".into());
+
+        app.update(Action::AgentsRefreshed(vec![
+            stopped, running, completed, error,
+        ]));
+
+        let branches: Vec<_> = app.agents.iter().map(|a| a.branch.as_str()).collect();
+        assert_eq!(branches, ["error", "completed", "running", "stopped"]);
+    }
+
+    #[test]
+    fn tick_reorders_finished_session_and_keeps_it_selected() {
+        let mut app = test_app();
+        let mut running = mock_agent("running");
+        running.last_pane_hash = Some(0x1);
+        running.quiet_captures = crate::agent::QUIET_THRESHOLD;
+        running.seen_activity_since_seed = true;
+        running.was_spinner_visible = true;
+        let mut still_running = mock_agent("still-running");
+        still_running.last_pane_hash = Some(0x2);
+        still_running.seen_activity_since_seed = true;
+        still_running.quiet_captures = 0;
+        still_running.was_spinner_visible = true;
+        app.agents = vec![still_running, running];
+        app.selected = 1;
+
+        app.update(Action::Tick);
+
+        let branches: Vec<_> = app.agents.iter().map(|a| a.branch.as_str()).collect();
+        assert_eq!(branches, ["running", "still-running"]);
+        assert_eq!(app.agents[app.selected].branch, "running");
+    }
+
+    #[test]
     fn agent_ready_updates_status_and_worktree_path() {
         let mut app = test_app();
         let mut creating = mock_agent_creating("fix-auth");
@@ -2119,10 +2231,10 @@ mod tests {
             worktree_path: failed_path.clone(),
         });
 
-        assert!(matches!(app.agents[0].status, AgentStatus::Running));
-        assert_eq!(app.agents[0].worktree_path, real_path);
-        assert!(matches!(app.agents[1].status, AgentStatus::Error(_)));
-        assert_eq!(app.agents[1].worktree_path, failed_path);
+        assert!(matches!(app.agents[0].status, AgentStatus::Error(_)));
+        assert_eq!(app.agents[0].worktree_path, failed_path);
+        assert!(matches!(app.agents[1].status, AgentStatus::Running));
+        assert_eq!(app.agents[1].worktree_path, real_path);
     }
 
     #[test]
@@ -2146,10 +2258,10 @@ mod tests {
         });
 
         assert_eq!(app.agents.len(), 2);
-        assert!(matches!(app.agents[0].status, AgentStatus::Running));
-        assert_eq!(app.agents[0].worktree_path, real_path);
-        assert!(matches!(app.agents[1].status, AgentStatus::Error(_)));
-        assert_eq!(app.agents[1].worktree_path, failed_path);
+        assert!(matches!(app.agents[0].status, AgentStatus::Error(_)));
+        assert_eq!(app.agents[0].worktree_path, failed_path);
+        assert!(matches!(app.agents[1].status, AgentStatus::Running));
+        assert_eq!(app.agents[1].worktree_path, real_path);
     }
 
     #[test]
