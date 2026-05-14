@@ -1171,6 +1171,9 @@ impl App {
             }
             Action::AgentsRefreshed(mut new_agents) => {
                 let selected_before_refresh = self.selected_agent_key();
+                let selected_session_before_refresh = selected_before_refresh
+                    .as_ref()
+                    .map(|key| key.session_name.clone());
 
                 self.discover_pending = false;
                 self.pending_lifecycle_worktrees
@@ -1236,6 +1239,17 @@ impl App {
                 }
                 self.agents = new_agents;
                 self.sort_agents_by_status_preserving_selection(selected_before_refresh);
+                let preview_is_stale = match self.selected_agent() {
+                    Some(agent) => {
+                        selected_session_before_refresh.as_deref()
+                            != Some(agent.session_name.as_str())
+                            || !agent.status.has_session()
+                    }
+                    None => true,
+                };
+                if preview_is_stale {
+                    self.preview_content = None;
+                }
                 cmds.extend(self.schedule_mr_refresh());
                 self.capture_pending.retain(|session| {
                     self.agents
@@ -5588,6 +5602,19 @@ mod tests {
 
         // New status (Running) wins.
         assert!(matches!(app.agents[0].status, AgentStatus::Running));
+    }
+
+    #[test]
+    fn agents_refreshed_clears_preview_when_selected_session_stops() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+        app.preview_content = Some("last dmux output".into());
+
+        let mut from_discover = mock_agent("fix-auth");
+        from_discover.status = AgentStatus::Stopped;
+        app.update(Action::AgentsRefreshed(vec![from_discover]));
+
+        assert_eq!(app.preview_content, None);
     }
 
     #[test]
