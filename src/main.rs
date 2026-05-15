@@ -10,7 +10,13 @@ mod table;
 mod ui;
 mod wizard;
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use crossterm::{
     event::{DisableFocusChange, EnableFocusChange, EventStream, KeyEventKind},
@@ -33,15 +39,57 @@ enum Event {
     Tick,
 }
 
+/// Sends UI events from the background reader into the main loop.
+#[derive(Clone)]
+struct EventSink {
+    tx: mpsc::UnboundedSender<Event>,
+    tick_pending: Arc<AtomicBool>,
+}
+
+impl EventSink {
+    fn new(tx: mpsc::UnboundedSender<Event>, tick_pending: Arc<AtomicBool>) -> Self {
+        Self { tx, tick_pending }
+    }
+
+    fn send(&self, event: Event) -> bool {
+        self.tx.send(event).is_ok()
+    }
+
+    fn send_tick(&self) -> bool {
+        if self
+            .tick_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return !self.tx.is_closed();
+        }
+
+        if self.tx.send(Event::Tick).is_ok() {
+            true
+        } else {
+            self.tick_pending.store(false, Ordering::Release);
+            false
+        }
+    }
+
+    fn tick_consumed(&self) {
+        self.tick_pending.store(false, Ordering::Release);
+    }
+}
+
 /// Manages the event-producing background task.
 struct EventHandle {
     rx: mpsc::UnboundedReceiver<Event>,
     cancel: CancellationToken,
+    sink: EventSink,
 }
 
 impl EventHandle {
     fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let tick_pending = Arc::new(AtomicBool::new(false));
+        let sink = EventSink::new(tx, tick_pending);
+        let task_sink = sink.clone();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
@@ -63,23 +111,28 @@ impl EventHandle {
                                 _ => None,
                             };
                             if let Some(e) = mapped
-                                && tx.send(e).is_err() { break; }
+                                && !task_sink.send(e) { break; }
                         }
                     }
                     _ = tick.tick() => {
-                        if tx.send(Event::Tick).is_err() { break; }
+                        if !task_sink.send_tick() { break; }
                     }
                 }
             }
         });
 
-        Self { rx, cancel }
+        Self { rx, cancel, sink }
     }
 
     /// Stop the event task and drain buffered events.
     fn stop(&mut self) {
         self.cancel.cancel();
         while self.rx.try_recv().is_ok() {}
+        self.sink.tick_consumed();
+    }
+
+    fn tick_consumed(&self) {
+        self.sink.tick_consumed();
     }
 
     /// Restart with a fresh event task (after terminal resume).
@@ -272,6 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     Event::Tick => {
+                        events.tick_consumed();
                         for cmd in app.update(Action::Tick) {
                             execute(cmd, &action_tx);
                         }
@@ -1125,6 +1179,35 @@ mod tests {
             }
             other => panic!("expected GitlabMrsLoaded, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn event_handle_coalesces_ticks_while_receiver_is_idle() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = EventSink::new(tx, Arc::new(AtomicBool::new(false)));
+
+        for _ in 0..5 {
+            assert!(sink.send_tick());
+        }
+
+        let mut ticks = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::Tick) {
+                ticks += 1;
+            }
+        }
+        assert_eq!(ticks, 1, "stale ticks should not backlog");
+
+        sink.tick_consumed();
+        assert!(sink.send_tick());
+
+        let mut next_ticks = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::Tick) {
+                next_ticks += 1;
+            }
+        }
+        assert_eq!(next_ticks, 1, "a consumed tick should allow one new tick");
     }
 
     #[test]
