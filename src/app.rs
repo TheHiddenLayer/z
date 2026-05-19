@@ -683,7 +683,6 @@ impl App {
                     return cmds;
                 }
                 cmds.push(Command::LoadBranches(repos[0].clone()));
-                cmds.push(Command::LoadGitlabIssues(repos[0].clone()));
                 let today = chrono_free_date_str();
                 self.mode = Mode::NewAgent(Box::new(NewAgent::new(
                     &today,
@@ -2853,27 +2852,29 @@ mod tests {
     }
 
     #[test]
-    fn start_new_agent_defaults_to_issue_source_and_fetches_issues() {
+    fn start_new_agent_defaults_to_branch_source_and_loads_only_branches() {
         let mut app = test_app();
 
         let cmds = app.update(Action::StartNewAgent);
 
         let state = new_agent_state(&app);
-        assert_eq!(state.source, NewAgentSource::Issue);
+        assert_eq!(state.source, NewAgentSource::Branch);
         assert_eq!(state.focus, NewAgentFocus::Repo);
         assert!(cmds.iter().any(|c| matches!(c, Command::LoadBranches(_))));
         assert!(
-            cmds.iter()
+            !cmds
+                .iter()
                 .any(|c| matches!(c, Command::LoadGitlabIssues(_)))
         );
+        assert!(!cmds.iter().any(|c| matches!(c, Command::LoadGitlabMrs(_))));
     }
 
     #[test]
-    fn source_picker_cycles_from_issue_to_mr_to_branch() {
+    fn source_picker_cycles_from_branch_to_mr_to_issue() {
         let mut app = test_app_in_new_agent_mode();
         {
             let state = new_agent_state_mut(&mut app);
-            state.source = NewAgentSource::Issue;
+            state.source = NewAgentSource::Branch;
             state.focus = NewAgentFocus::Source;
         }
 
@@ -2881,11 +2882,21 @@ mod tests {
         assert_eq!(new_agent_state(&app).source, NewAgentSource::Mr);
         assert!(cmds.iter().any(|c| matches!(c, Command::LoadGitlabMrs(_))));
 
-        app.update(Action::PickerNext);
-        assert_eq!(new_agent_state(&app).source, NewAgentSource::Branch);
-
-        app.update(Action::PickerNext);
+        let cmds = app.update(Action::PickerNext);
         assert_eq!(new_agent_state(&app).source, NewAgentSource::Issue);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::LoadGitlabIssues(_)))
+        );
+
+        let cmds = app.update(Action::PickerNext);
+        assert_eq!(new_agent_state(&app).source, NewAgentSource::Branch);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::LoadGitlabIssues(_)))
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, Command::LoadGitlabMrs(_))));
     }
 
     fn test_app_in_new_agent_mode() -> App {
@@ -4036,6 +4047,7 @@ mod tests {
         {
             let state = new_agent_state_mut(&mut app);
             state.focus = NewAgentFocus::Repo;
+            state.source = NewAgentSource::Issue;
             state.source_query.push_str("auth");
             state.source_index = 2;
             state.issues = RemoteList::Loaded(vec![]);

@@ -84,10 +84,10 @@ impl NewAgent {
     pub fn new(today: &str, agent_name: String) -> Self {
         Self {
             repo_index: 0,
-            source: Source::Issue,
+            source: Source::Branch,
             source_query: String::new(),
             source_index: 0,
-            issues: Remote::Loading,
+            issues: Remote::Idle,
             mrs: Remote::Idle,
             selected_issue: None,
             selected_mr: None,
@@ -153,12 +153,12 @@ impl NewAgent {
         match self.focus {
             Focus::Source => {
                 self.source = match (direction, self.source) {
-                    (Direction::Next, Source::Issue) => Source::Mr,
-                    (Direction::Next, Source::Mr) => Source::Branch,
-                    (Direction::Next, Source::Branch) => Source::Issue,
-                    (Direction::Prev, Source::Issue) => Source::Branch,
-                    (Direction::Prev, Source::Branch) => Source::Mr,
-                    (Direction::Prev, Source::Mr) => Source::Issue,
+                    (Direction::Next, Source::Branch) => Source::Mr,
+                    (Direction::Next, Source::Mr) => Source::Issue,
+                    (Direction::Next, Source::Issue) => Source::Branch,
+                    (Direction::Prev, Source::Branch) => Source::Issue,
+                    (Direction::Prev, Source::Issue) => Source::Mr,
+                    (Direction::Prev, Source::Mr) => Source::Branch,
                 };
                 self.source_index = 0;
                 self.source_query.clear();
@@ -431,8 +431,9 @@ mod tests {
     }
 
     #[test]
-    fn source_picker_reports_load_effects() {
+    fn source_picker_cycles_branch_mr_issue_and_reports_load_effects() {
         let mut state = NewAgent::new("0509", "codex".to_string());
+        state.source = Source::Branch;
         state.focus = Focus::Source;
 
         let effects = state.move_picker(Direction::Next, 1, "0509");
@@ -441,6 +442,20 @@ mod tests {
         assert_eq!(state.source_index, 0);
         assert!(effects.load_mrs);
         assert!(!effects.load_issues);
+        assert!(!effects.reload_branches);
+
+        let effects = state.move_picker(Direction::Next, 1, "0509");
+
+        assert_eq!(state.source, Source::Issue);
+        assert!(effects.load_issues);
+        assert!(!effects.load_mrs);
+        assert!(!effects.reload_branches);
+
+        let effects = state.move_picker(Direction::Next, 1, "0509");
+
+        assert_eq!(state.source, Source::Branch);
+        assert!(!effects.load_issues);
+        assert!(!effects.load_mrs);
         assert!(!effects.reload_branches);
     }
 
