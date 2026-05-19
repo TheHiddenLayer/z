@@ -30,7 +30,7 @@ fn table_scroll_offset(selected: usize, visible_rows: usize) -> usize {
     }
 }
 
-/// Builder-lite widget. Construct via [`new`], chain optional setters, then
+/// Builder-lite widget. Construct via [`Self::new`], chain optional setters, then
 /// `frame.render_widget(&widget, area)`.
 pub struct AgentTableWidget<'a> {
     agents: &'a [Agent],
