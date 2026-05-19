@@ -369,14 +369,14 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
     // --- Source row ---
     let is_source = matches!(state.focus, NewAgentFocus::Source);
     let source_selected = match state.source {
-        NewAgentSource::Issue => 0,
+        NewAgentSource::Branch => 0,
         NewAgentSource::Mr => 1,
-        NewAgentSource::Branch => 2,
+        NewAgentSource::Issue => 2,
     };
     let (source_label_rect, source_value_rect) = split_row(source_row);
     render_label("Source", is_source, source_label_rect, buf);
     let source_inner = render_focus_frame(is_source, source_value_rect, buf);
-    Paragraph::new(tab_value_line(&["issue", "mr", "branch"], source_selected))
+    Paragraph::new(tab_value_line(&["branch", "mr", "issue"], source_selected))
         .render(source_inner, buf);
 
     // --- Branch toggle row ---

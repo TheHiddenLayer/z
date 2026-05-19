@@ -929,7 +929,7 @@ mod tests {
         let text = render_app(&app);
 
         assert!(
-            text.contains("Source   issue  mr  branch"),
+            text.contains("Source   branch  mr  issue"),
             "source choice should expose all start modes as tabs:\n{text}"
         );
     }
@@ -946,12 +946,13 @@ mod tests {
         // padding col before the value. Other rows are unfocused → 2 blank
         // padding cols before the value, so 3 blanks separate label and value.
         let repo = text.find("Repo \u{2502} myapp").expect(&text);
-        let source = text.find("Source   issue  mr  branch").expect(&text);
-        let search = text.find("Search   filter issues...").expect(&text);
+        let source = text.find("Source   branch  mr  issue").expect(&text);
+        let branch = text.find("Branch   new  existing").expect(&text);
+        let name = text.find("Name").expect(&text);
         let prompt = text.find("Prompt").expect(&text);
         let agent = text.find("Agent   claude  codex").expect(&text);
         assert!(
-            repo < source && source < search && search < prompt && prompt < agent,
+            repo < source && source < branch && branch < name && name < prompt && prompt < agent,
             "wizard controls should be ordered Repo, Source, Search/options, Prompt, Agent:\n{text}"
         );
     }
@@ -978,6 +979,7 @@ mod tests {
     fn issue_prompt_summary_shows_prompt_content() {
         let mut app = test_app();
         app.update(Action::StartNewAgent);
+        new_agent_state_mut(&mut app).source = NewAgentSource::Issue;
         app.update(Action::GitlabIssuesLoaded {
             repo: "/tmp/myapp".into(),
             result: Ok(vec![GitlabIssue {
@@ -1113,6 +1115,7 @@ mod tests {
         {
             let state = new_agent_state_mut(&mut app);
             state.focus = NewAgentFocus::SourceList;
+            state.source = NewAgentSource::Issue;
             state.source_index = 7;
             state.issues =
                 RemoteList::Loaded((1..=8).map(|n| issue(n, &format!("Issue {n}"))).collect());
