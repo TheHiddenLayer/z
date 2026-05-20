@@ -179,5 +179,25 @@ jobs:
             exit 1
           fi
 
+          checks_file="$(mktemp)"
+          checks_error="$(mktemp)"
+          for attempt in {1..60}; do
+            if gh pr checks "$pr_number" --json name,bucket,state >"$checks_file" 2>"$checks_error"; then
+              if [[ "$(jq 'length' "$checks_file")" -gt 0 ]]; then
+                break
+              fi
+            elif ! grep -q "no checks reported" "$checks_error"; then
+              cat "$checks_error" >&2
+              exit 1
+            fi
+
+            if [[ "$attempt" == "60" ]]; then
+              echo "Timed out waiting for checks to appear on release PR #$pr_number." >&2
+              exit 1
+            fi
+
+            sleep 5
+          done
+
           gh pr checks "$pr_number" --watch --fail-fast
           gh pr merge "$pr_number" --merge --delete-branch
