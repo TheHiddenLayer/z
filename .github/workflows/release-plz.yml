@@ -25,16 +25,20 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - name: Validate release bot token
+      - name: Check release bot token
+        id: release_token
         env:
           RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
         run: |
           if [[ -z "$RELEASE_BOT_TOKEN" ]]; then
-            echo "RELEASE_BOT_TOKEN must be configured so release-plz PRs and tags trigger downstream workflows." >&2
-            exit 1
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_BOT_TOKEN is not configured; skipping release automation until the repo secret is added."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Checkout
+        if: steps.release_token.outputs.configured == 'true'
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -42,9 +46,11 @@ jobs:
           token: ${{ secrets.RELEASE_BOT_TOKEN }}
 
       - name: Install Rust
+        if: steps.release_token.outputs.configured == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run release-plz release
+        if: steps.release_token.outputs.configured == 'true'
         uses: release-plz/action@v0.5
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
@@ -60,16 +66,20 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Validate release bot token
+      - name: Check release bot token
+        id: release_token
         env:
           RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
         run: |
           if [[ -z "$RELEASE_BOT_TOKEN" ]]; then
-            echo "RELEASE_BOT_TOKEN must be configured so release-plz PRs and tags trigger downstream workflows." >&2
-            exit 1
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_BOT_TOKEN is not configured; skipping release automation until the repo secret is added."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Checkout
+        if: steps.release_token.outputs.configured == 'true'
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -77,9 +87,11 @@ jobs:
           token: ${{ secrets.RELEASE_BOT_TOKEN }}
 
       - name: Install Rust
+        if: steps.release_token.outputs.configured == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run release-plz release-pr
+        if: steps.release_token.outputs.configured == 'true'
         id: release-plz
         uses: release-plz/action@v0.5
         env:
@@ -88,6 +100,7 @@ jobs:
           command: release-pr
 
       - name: Enable release PR auto-merge
+        if: steps.release_token.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
           PR_JSON: ${{ steps.release-plz.outputs.pr }}
