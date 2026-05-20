@@ -16,6 +16,22 @@ use crate::style::{
 };
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
+const BLANK_PANE_Z: &[&str] = &[
+    "         ,----,",
+    "       .'   .`|",
+    "    .'   .'   ;",
+    "  ,---, '    .'",
+    "  |   :     ./",
+    "  ;   | .'  /",
+    "  `---' /  ;",
+    "    /  ;  /",
+    "   ;  /  /--,",
+    "  /  /  / .`|",
+    "./__;       :",
+    "|   :     .'",
+    ";   |  .'",
+    "`---'",
+];
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let inner = frame.area().inner(Margin {
@@ -434,6 +450,26 @@ fn tail_lines(s: &str, n: usize) -> &str {
     s
 }
 
+fn draw_blank_pane_placeholder(frame: &mut Frame, area: Rect) {
+    let art_width = BLANK_PANE_Z
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let art_height = BLANK_PANE_Z.len() as u16;
+    let width = art_width.min(area.width);
+    let height = art_height.min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let lines: Vec<Line<'static>> = BLANK_PANE_Z
+        .iter()
+        .map(|line| Line::from((*line).to_string()))
+        .collect();
+
+    let preview = Paragraph::new(lines).style(Style::default().fg(DIM));
+    frame.render_widget(preview, Rect::new(x, y, width, height));
+}
+
 fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
     if app.preview_mode == PreviewMode::MergeRequest {
         let preview = Paragraph::new(mr_preview_lines(app.selected_mr_snapshot()))
@@ -443,6 +479,11 @@ fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let content = app.preview_content.as_deref().unwrap_or("");
+    if content.trim().is_empty() {
+        draw_blank_pane_placeholder(frame, area);
+        return;
+    }
+
     let tail = tail_lines(content.trim_end(), area.height as usize);
     let preview = Paragraph::new(tail).style(Style::default().fg(TEXT));
 
@@ -804,6 +845,23 @@ mod tests {
         assert!(
             status.contains("tab session"),
             "MR preview should advertise tab as switching back to the agent session:\n{status}"
+        );
+    }
+
+    #[test]
+    fn blank_terminal_preview_renders_ascii_z_placeholder() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("fix-auth")];
+
+        let text = render_app(&app);
+
+        assert!(
+            text.contains(",----,"),
+            "blank preview should render the ASCII Z top:\n{text}"
+        );
+        assert!(
+            text.contains("./__;       :"),
+            "blank preview should render the ASCII Z lower face:\n{text}"
         );
     }
 
