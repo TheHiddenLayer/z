@@ -13,14 +13,9 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, StatefulWidget, Table, TableState, Widget},
 };
 
-use crate::agent::{Agent, AgentStatus};
+use crate::agent::Agent;
 use crate::gitlab::MrDisplayKind;
 use crate::style::{DIM, TEXT, drift_arrow, status_color};
-
-const SPINNER_FRAMES: [&str; 10] = [
-    "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}",
-    "\u{2807}", "\u{280F}",
-];
 
 fn table_scroll_offset(selected: usize, visible_rows: usize) -> usize {
     if visible_rows == 0 {
@@ -38,7 +33,6 @@ pub struct AgentTableWidget<'a> {
     /// is treated as "no MR data" for every row.
     mr_kinds: &'a [MrDisplayKind],
     selected: usize,
-    spinner_frame: usize,
     empty_message: &'a str,
 }
 
@@ -48,7 +42,6 @@ impl<'a> AgentTableWidget<'a> {
             agents,
             mr_kinds: &[],
             selected: 0,
-            spinner_frame: 0,
             empty_message: "No agents yet.",
         }
     }
@@ -60,11 +53,6 @@ impl<'a> AgentTableWidget<'a> {
 
     pub fn selected(mut self, index: usize) -> Self {
         self.selected = index;
-        self
-    }
-
-    pub fn spinner_frame(mut self, frame: usize) -> Self {
-        self.spinner_frame = frame;
         self
     }
 
@@ -163,7 +151,7 @@ impl Widget for &AgentTableWidget<'_> {
 
             rows.push(Row::new(vec![
                 Cell::from(Span::styled(indicator, indicator_style)),
-                Cell::from(status_glyph(agent, self.spinner_frame)),
+                Cell::from(status_dot(agent)),
                 Cell::from(Span::styled(mr_status_label(mr_kind), text_style)),
                 Cell::from(branch_cell),
                 Cell::from(base_cell),
@@ -203,16 +191,8 @@ impl Widget for &AgentTableWidget<'_> {
     }
 }
 
-fn status_glyph(agent: &Agent, frame_idx: usize) -> Span<'static> {
-    let style = Style::default().fg(status_color(agent));
-    match &agent.status {
-        AgentStatus::Error(_) => Span::styled("\u{2717}", style),
-        AgentStatus::Stopped => Span::styled("\u{2212}", style),
-        _ if agent.shows_spinner() => {
-            Span::styled(SPINNER_FRAMES[frame_idx % SPINNER_FRAMES.len()], style)
-        }
-        _ => Span::styled("\u{2713}", style),
-    }
+fn status_dot(agent: &Agent) -> Span<'static> {
+    Span::styled("\u{25CF}", Style::default().fg(status_color(agent)))
 }
 
 fn mr_status_label(kind: MrDisplayKind) -> &'static str {
@@ -233,7 +213,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use crate::agent::tests::make_agent_with_status;
+    use crate::agent::{AgentStatus, tests::make_agent_with_status};
 
     fn render_widget(
         widget: &AgentTableWidget<'_>,
@@ -299,6 +279,35 @@ mod tests {
         let terminal = render_widget(&widget, 60, 6);
         let dump = buffer_to_string(&terminal);
         assert!(dump.contains("ready"), "MR label missing in:\n{dump}");
+    }
+
+    #[test]
+    fn status_column_renders_single_colored_dot_for_every_state() {
+        fn rendered_status_cell(agent: Agent) -> (String, ratatui::style::Color) {
+            let agents = vec![agent];
+            let widget = AgentTableWidget::new(&agents);
+            let terminal = render_widget(&widget, 40, 4);
+            let cell = &terminal.backend().buffer()[(2, 2)];
+            (cell.symbol().to_string(), cell.fg)
+        }
+
+        let mut active = make_agent_with_status(AgentStatus::Running);
+        active.seen_activity_since_seed = true;
+        active.last_pane_hash = Some(1);
+
+        let agents = [
+            active,
+            make_agent_with_status(AgentStatus::Running),
+            make_agent_with_status(AgentStatus::Stopped),
+            make_agent_with_status(AgentStatus::Error("boom".into())),
+        ];
+
+        for agent in agents {
+            let expected_color = status_color(&agent);
+            let (symbol, color) = rendered_status_cell(agent);
+            assert_eq!(symbol, "\u{25CF}");
+            assert_eq!(color, expected_color);
+        }
     }
 
     #[test]
