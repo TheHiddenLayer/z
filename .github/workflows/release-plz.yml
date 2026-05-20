@@ -157,9 +157,11 @@ jobs:
         id: current_master
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
-          latest_sha="$(git ls-remote origin "refs/heads/${DEFAULT_BRANCH}" | awk '{print $1}')"
+          latest_sha="$(gh api "repos/$REPOSITORY/git/ref/heads/$DEFAULT_BRANCH" --jq '.object.sha')"
           if [[ -z "$latest_sha" ]]; then
             echo "Could not resolve refs/heads/${DEFAULT_BRANCH}." >&2
             exit 1
