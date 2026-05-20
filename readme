@@ -1,0 +1,86 @@
+# z
+
+TUI for running coding agents in git worktrees backed by tmux sessions.
+
+`z` tracks configured repos, creates per-task worktrees, starts an agent in
+each one, shows activity, lets you attach to the tmux session, and exposes
+GitLab MR actions through `glab`.
+
+## Requirements
+
+- Rust 1.88+
+- git
+- tmux
+- `glab` for GitLab issue/MR actions
+- an agent command such as `claude` or `codex`
+
+## Install
+
+```sh
+cargo install --path .
+```
+
+Or run from the checkout:
+
+```sh
+cargo run --locked --release
+```
+
+## Config
+
+Config lives at `~/.config/z/config.toml`. If missing, `z` creates:
+
+```toml
+repos = []
+```
+
+Example:
+
+```toml
+repos = ["~/src/project"]
+default_agent = "codex"
+
+[agents.claude]
+cmd = "claude --dangerously-skip-permissions"
+resume = "claude --dangerously-skip-permissions --continue"
+
+[agents.codex]
+cmd = "codex --dangerously-bypass-approvals-and-sandbox"
+resume = "codex resume --last"
+
+[notifications]
+enabled = true
+only_when_unfocused = true
+```
+
+If `[agents]` is omitted, built-ins for `claude` and `codex` are used.
+
+## Run
+
+```sh
+z
+z --version
+z destroy
+z destroy -y
+z destroy --preserve-tmux
+```
+
+New worktrees are created next to the repo under `<repo>-worktrees/`.
+`z destroy` removes managed worktrees, branches, and tmux sessions.
+
+## Keys
+
+- `n`: new agent
+- `a` / `Enter`: attach
+- `j` / `k` or arrows: move
+- `Tab`: toggle terminal/MR preview
+- `m`: create MR
+- `M`: merge MR
+- `o`: open MR
+- `r`: rebase
+- `f`: make ready
+- `v`: address review
+- `x`: stop tmux session
+- `d`: delete selected agent
+- `?`: keymap
+- `q`: quit
