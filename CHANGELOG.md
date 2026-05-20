@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/TheHiddenLayer/z/compare/v0.2.0...v0.2.1) - 2026-05-20
+
+### Other
+
+- add readme
+- checkout before publishing releases
+- tag merged release PRs
+- wait for release PR checks
+
 ## [0.2.0](https://github.com/TheHiddenLayer/z/releases/tag/v0.2.0) - 2026-05-20
 
 ### Added
