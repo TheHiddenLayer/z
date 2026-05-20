@@ -6,14 +6,12 @@ use ratatui::{
     Frame,
     buffer::Buffer,
     layout::{Constraint, Layout, Margin, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 
-use crate::style::{
-    BUSY, DIM, FAIL, OK, TEXT, drift_arrow, footer_hint, modal_title, status_color,
-};
+use crate::style::{BUSY, DIM, FAIL, OK, TEXT, footer_hint, modal_title};
 
 const AGENT_TABLE_HEIGHT: u16 = 6;
 
@@ -49,7 +47,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_preview(frame, app, preview_pane);
     }
 
-    draw_separator(frame, app, separator);
+    draw_separator(frame, separator);
     draw_agent_table(frame, app, agent_table);
     draw_status_bar(frame, app, status_bar);
 
@@ -211,183 +209,16 @@ fn draw_agent_table(frame: &mut Frame, app: &App, area: Rect) {
     let widget = AgentTableWidget::new(&app.agents)
         .mr_kinds(&mr_kinds)
         .selected(app.selected)
-        .spinner_frame(app.spinner_frame)
         .empty_message(empty_message);
     frame.render_widget(&widget, area);
 }
 
-#[derive(Clone, Copy)]
-struct SeparatorPosition {
-    color: Color,
-    selected: bool,
-}
-
-#[derive(Clone, Copy)]
-enum SeparatorLabel<'a> {
-    Branch { branch: &'a str },
-    Drifted { slug: &'a str, branch: &'a str },
-}
-
-struct SeparatorWidget<'a> {
-    label: Option<SeparatorLabel<'a>>,
-    positions: &'a [SeparatorPosition],
-    has_new_agent_candidate: bool,
-}
-
-impl<'a> SeparatorWidget<'a> {
-    const fn new() -> Self {
-        Self {
-            label: None,
-            positions: &[],
-            has_new_agent_candidate: false,
-        }
-    }
-
-    const fn label(mut self, label: SeparatorLabel<'a>) -> Self {
-        self.label = Some(label);
-        self
-    }
-
-    const fn positions(mut self, positions: &'a [SeparatorPosition]) -> Self {
-        self.positions = positions;
-        self
-    }
-
-    const fn new_agent_candidate(mut self, has_candidate: bool) -> Self {
-        self.has_new_agent_candidate = has_candidate;
-        self
-    }
-
-    fn label_spans(&self) -> Option<Vec<Span<'a>>> {
-        let dim_style = Style::default().fg(DIM);
-        let label_style = Style::default().fg(TEXT);
-
-        let mut spans = vec![Span::styled(" ", dim_style)];
-        match self.label? {
-            SeparatorLabel::Branch { branch } => {
-                spans.push(Span::styled(branch, label_style));
-            }
-            SeparatorLabel::Drifted { slug, branch } => {
-                spans.push(Span::styled(slug, label_style));
-                spans.push(drift_arrow());
-                spans.push(Span::styled(
-                    branch,
-                    label_style.add_modifier(Modifier::ITALIC),
-                ));
-            }
-        }
-        spans.push(Span::styled(" ", dim_style));
-        Some(spans)
-    }
-
-    fn position_spans(&self) -> Option<Vec<Span<'a>>> {
-        if self.positions.is_empty() && !self.has_new_agent_candidate {
-            return None;
-        }
-
-        let dim_style = Style::default().fg(DIM);
-        let mut spans = vec![Span::styled(" ", dim_style)];
-        for (i, position) in self.positions.iter().enumerate() {
-            let glyph = if position.selected {
-                "\u{25CF}"
-            } else {
-                "\u{2022}"
-            };
-            spans.push(Span::styled(glyph, Style::default().fg(position.color)));
-            if i + 1 < self.positions.len() {
-                spans.push(Span::styled(" ", dim_style));
-            }
-        }
-        if self.has_new_agent_candidate {
-            if !self.positions.is_empty() {
-                spans.push(Span::styled(" ", dim_style));
-            }
-            spans.push(Span::styled("\u{25E6}", dim_style));
-        }
-        spans.push(Span::styled(" ", dim_style));
-        Some(spans)
-    }
-
-    fn line(&self, width: usize) -> Line<'a> {
-        let dash_style = Style::default().fg(DIM);
-        let label_spans = self.label_spans();
-        let position_spans = self.position_spans();
-
-        match (label_spans, position_spans) {
-            (Some(label), Some(pos)) => {
-                let label_len: usize = label.iter().map(|s| s.width()).sum();
-                let pos_len: usize = pos.iter().map(|s| s.width()).sum();
-                let left_dashes = 3;
-                let right_dashes = 3;
-                let middle_dashes =
-                    width.saturating_sub(left_dashes + pos_len + label_len + right_dashes);
-                let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
-                spans.extend(pos);
-                spans.push(Span::styled("\u{2500}".repeat(middle_dashes), dash_style));
-                spans.extend(label);
-                spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
-                Line::from(spans)
-            }
-            (Some(label), None) => {
-                let label_len: usize = label.iter().map(|s| s.width()).sum();
-                let right_dashes = 3;
-                let left_dashes = width.saturating_sub(label_len + right_dashes);
-                let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
-                spans.extend(label);
-                spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
-                Line::from(spans)
-            }
-            (None, Some(pos)) => {
-                let pos_len: usize = pos.iter().map(|s| s.width()).sum();
-                let left_dashes = 3;
-                let right_dashes = width.saturating_sub(left_dashes + pos_len);
-                let mut spans = vec![Span::styled("\u{2500}".repeat(left_dashes), dash_style)];
-                spans.extend(pos);
-                spans.push(Span::styled("\u{2500}".repeat(right_dashes), dash_style));
-                Line::from(spans)
-            }
-            (None, None) => Line::from(Span::styled("\u{2500}".repeat(width), dash_style)),
-        }
-    }
-}
-
-impl Widget for &SeparatorWidget<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        Paragraph::new(self.line(area.width as usize)).render(area, buf);
-    }
-}
-
-fn draw_separator(frame: &mut Frame, app: &App, area: Rect) {
-    let label = app.selected_agent().map(|agent| {
-        let drifted = agent.slug != agent.branch.replace('/', "-");
-        if drifted {
-            SeparatorLabel::Drifted {
-                slug: agent.slug.as_str(),
-                branch: agent.branch.as_str(),
-            }
-        } else {
-            SeparatorLabel::Branch {
-                branch: agent.branch.as_str(),
-            }
-        }
-    });
-    let positions: Vec<SeparatorPosition> = app
-        .agents
-        .iter()
-        .enumerate()
-        .map(|(i, agent)| SeparatorPosition {
-            color: status_color(agent),
-            selected: i == app.selected,
-        })
-        .collect();
-    let mut widget = SeparatorWidget::new()
-        .positions(&positions)
-        .new_agent_candidate(matches!(app.mode, Mode::NewAgent(_)));
-    if let Some(label) = label {
-        widget = widget.label(label);
-    }
-
-    frame.render_widget(&widget, area);
+fn draw_separator(frame: &mut Frame, area: Rect) {
+    let line = Span::styled(
+        "\u{2500}".repeat(area.width as usize),
+        Style::default().fg(DIM),
+    );
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 struct ModalFrame<'a> {
@@ -655,16 +486,6 @@ mod tests {
             .to_string()
     }
 
-    fn render_widget_text<W: ratatui::widgets::Widget>(
-        widget: W,
-        width: u16,
-        height: u16,
-    ) -> String {
-        let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
-        widget.render(*buffer.area(), &mut buffer);
-        buffer_text(&buffer)
-    }
-
     fn find_text_pos(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
         let needle_width = needle.chars().count() as u16;
         for y in 0..buffer.area().height {
@@ -762,29 +583,36 @@ mod tests {
     }
 
     #[test]
-    fn separator_widget_renders_positions_label_and_dashes_from_props() {
-        let positions = [
-            SeparatorPosition {
-                color: OK,
-                selected: true,
-            },
-            SeparatorPosition {
-                color: DIM,
-                selected: false,
-            },
-        ];
-        let widget = SeparatorWidget::new()
-            .positions(&positions)
-            .label(SeparatorLabel::Branch {
-                branch: "feature-x",
-            });
+    fn home_separator_is_plain_horizontal_rule() {
+        let mut app = test_app();
+        app.agents = vec![mock_agent("feature-x"), mock_agent("docs")];
+        app.selected = 0;
 
-        let text = render_widget_text(&widget, 24, 1);
+        let buffer = render_app_buffer(&app);
+        let rows_with_rule: Vec<(u16, String)> = (0..buffer.area().height)
+            .filter_map(|y| {
+                let row = (0..buffer.area().width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                row.contains('\u{2500}').then_some((y, row))
+            })
+            .collect();
 
         assert_eq!(
-            text,
-            "\u{2500}\u{2500}\u{2500} \u{25CF} \u{2022} \u{2500}\u{2500} feature-x \u{2500}\u{2500}\u{2500}"
+            rows_with_rule.len(),
+            1,
+            "expected a single separator rule:\n{}",
+            buffer_text(&buffer)
         );
+        let (_, row) = &rows_with_rule[0];
+        assert_eq!(row.chars().filter(|ch| *ch == '\u{2500}').count(), 74);
+        assert!(
+            row.chars().all(|ch| ch == ' ' || ch == '\u{2500}'),
+            "separator should contain only spaces and rule glyphs, got {row:?}"
+        );
+        assert!(!row.contains("feature-x"));
+        assert!(!row.contains('\u{25CF}'));
+        assert!(!row.contains('\u{2022}'));
     }
 
     #[test]
@@ -1094,16 +922,17 @@ mod tests {
     }
 
     #[test]
-    fn new_agent_wizard_adds_draft_dot_to_separator() {
+    fn new_agent_wizard_keeps_separator_plain() {
         let mut app = test_app();
         app.agents = vec![mock_agent("fix-auth"), mock_agent("docs")];
         app.update(Action::StartNewAgent);
 
-        let text = render_app(&app);
+        let buffer = render_app_buffer(&app);
+        let text = buffer_text(&buffer);
 
         assert!(
-            text.contains("\u{25E6}"),
-            "separator should include a draft candidate dot while wizard is open:\n{text}"
+            !text.contains("\u{25E6}"),
+            "separator should not include a draft candidate dot while wizard is open:\n{text}"
         );
     }
 

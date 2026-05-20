@@ -337,7 +337,7 @@ pub struct App {
     pub should_quit: bool,
     pub status_message: Option<String>,
     pub preview_content: Option<String>,
-    pub spinner_frame: usize,
+    pub tick_frame: usize,
     pub dirty: bool,
     /// Controls the optional bottom keymap legend across app modes.
     pub keymap_visible: bool,
@@ -365,7 +365,7 @@ impl App {
             should_quit: false,
             status_message: None,
             preview_content: None,
-            spinner_frame: 0,
+            tick_frame: 0,
             dirty: true, // render on first frame
             keymap_visible: false,
             preview_mode: PreviewMode::Terminal,
@@ -1614,15 +1614,13 @@ impl App {
 
             // --- System ---
             Action::Tick => {
-                self.spinner_frame = self.spinner_frame.wrapping_add(1);
+                self.tick_frame = self.tick_frame.wrapping_add(1);
                 let selected_before = self.selected_agent_key();
 
-                // Walk agents once: fire the spinner→done notification edge,
+                // Walk agents once: fire the working→done notification edge,
                 // update was_spinner_visible, and decide whether to repaint.
-                // Repaint when any spinner is visible (animate it) OR any
-                // agent's working state flipped (catch the working→done
-                // transition frame, which would otherwise freeze the spinner
-                // on its last glyph).
+                // Repaint when any busy dot is visible OR any agent's working
+                // state flipped, catching the working→done transition frame.
                 let notify = self.should_notify();
                 let mut any_visible = false;
                 let mut any_change = false;
@@ -1665,7 +1663,7 @@ impl App {
                 // agent. Drives sub-second "done" detection via content-hash deltas
                 // (replaces the coarse-grained tmux window_activity timestamp), and
                 // the selected agent's capture doubles as preview content.
-                if self.spinner_frame.is_multiple_of(5) {
+                if self.tick_frame.is_multiple_of(5) {
                     let sessions: Vec<_> = self
                         .agents
                         .iter()
@@ -1682,14 +1680,14 @@ impl App {
                 // Rediscover agents every 30th tick (~3s), with backpressure.
                 // Runs in every mode: modal flows (e.g. the new-agent wizard) take
                 // seconds to navigate, and without rediscovery the activity
-                // timestamps go stale, flipping live agents to a checkmark and
+                // timestamps go stale, flipping live agents to idle/done and
                 // firing spurious "agent finished working" notifications.
-                if self.spinner_frame.is_multiple_of(30) && !self.discover_pending {
+                if self.tick_frame.is_multiple_of(30) && !self.discover_pending {
                     self.discover_pending = true;
                     cmds.push(Command::Discover(self.config.resolved_repos()));
                 }
 
-                if self.spinner_frame.is_multiple_of(100) {
+                if self.tick_frame.is_multiple_of(100) {
                     cmds.extend(self.schedule_mr_refresh());
                 }
             }
@@ -4277,7 +4275,7 @@ mod tests {
     fn tick_keeps_emitting_discover_in_new_agent_mode() {
         // Regression: opening the new-agent wizard used to halt rediscovery,
         // so live agents stopped getting their observation state refreshed.
-        // They flipped to checkmarks and fired spurious "finished working"
+        // They flipped to idle/done and fired spurious "finished working"
         // notifications while the user was just tabbing through the wizard.
         let mut app = test_app();
         app.mode = branch_new_agent_mode! {
@@ -4317,7 +4315,7 @@ mod tests {
         let agent = mock_agent("a");
         let session = agent.session_name.clone();
         app.agents = vec![agent];
-        app.spinner_frame = 4;
+        app.tick_frame = 4;
 
         let cmds = app.update(Action::Tick);
 
@@ -4327,7 +4325,7 @@ mod tests {
         );
         assert!(app.capture_pending.contains(&session));
 
-        app.spinner_frame = 9;
+        app.tick_frame = 9;
         let cmds = app.update(Action::Tick);
 
         assert!(
