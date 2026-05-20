@@ -250,10 +250,11 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" --generate-notes
           fi
 
           gh release upload "$TAG" dist/* --clobber
+          gh release edit "$TAG" --draft=false --latest
 
   ci-success:
     name: CI success

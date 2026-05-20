@@ -45,17 +45,80 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.RELEASE_BOT_TOKEN }}
 
-      - name: Install Rust
+      - name: Detect merged release PR
         if: steps.release_token.outputs.configured == 'true'
+        id: merged_release_pr
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          pr_json="$(gh api "repos/$REPOSITORY/commits/$SHA/pulls" \
+            -H "Accept: application/vnd.github+json" \
+            --jq '[.[] | select(.merged_at != null)][0] // {}')"
+
+          pr_number="$(jq -r '.number // empty' <<<"$pr_json")"
+          pr_title="$(jq -r '.title // empty' <<<"$pr_json")"
+
+          if [[ -z "$pr_number" || ! "$pr_title" =~ ^chore:\ release\ v(.+)$ ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Current commit is not a merged release PR."
+            exit 0
+          fi
+
+          version="${BASH_REMATCH[1]}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release PR title has an invalid semver version: $pr_title" >&2
+            exit 1
+          fi
+
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Release PR #$pr_number requests v$version."
+
+      - name: Install Rust
+        if: steps.merged_release_pr.outputs.publish == 'true'
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run release-plz release
-        if: steps.release_token.outputs.configured == 'true'
-        uses: release-plz/action@v0.5
+      - name: Publish merged release PR tag
+        if: steps.merged_release_pr.outputs.publish == 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
-        with:
-          command: release
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TAG: ${{ steps.merged_release_pr.outputs.tag }}
+          VERSION: ${{ steps.merged_release_pr.outputs.version }}
+        run: |
+          manifest_versions="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].version' | sort -u)"
+          version_count="$(wc -l <<<"$manifest_versions" | tr -d ' ')"
+          if [[ "$version_count" != "1" ]]; then
+            echo "Expected exactly one workspace package version, found:" >&2
+            echo "$manifest_versions" >&2
+            exit 1
+          fi
+
+          manifest_version="$manifest_versions"
+          if [[ "$manifest_version" != "$VERSION" ]]; then
+            echo "Release PR version $VERSION does not match Cargo metadata version $manifest_version." >&2
+            exit 1
+          fi
+
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" "$SHA" -m "$TAG"
+            git push "https://x-access-token:${RELEASE_BOT_TOKEN}@github.com/${REPOSITORY}.git" "refs/tags/$TAG"
+          else
+            echo "Tag $TAG already exists."
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub release $TAG already exists."
+          else
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" --generate-notes
+          fi
 
   release-pr:
     name: Update release pull request
