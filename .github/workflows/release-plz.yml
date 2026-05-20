@@ -24,6 +24,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+    outputs:
+      published: ${{ steps.merged_release_pr.outputs.publish }}
     steps:
       - name: Check release bot token
         id: release_token
@@ -124,6 +126,7 @@ jobs:
     name: Update release pull request
     needs:
       - release
+    if: needs.release.outputs.published != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -149,12 +152,32 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.RELEASE_BOT_TOKEN }}
 
-      - name: Install Rust
+      - name: Check current master head
         if: steps.release_token.outputs.configured == 'true'
+        id: current_master
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SHA: ${{ github.sha }}
+        run: |
+          latest_sha="$(git ls-remote origin "refs/heads/${DEFAULT_BRANCH}" | awk '{print $1}')"
+          if [[ -z "$latest_sha" ]]; then
+            echo "Could not resolve refs/heads/${DEFAULT_BRANCH}." >&2
+            exit 1
+          fi
+
+          if [[ "$SHA" != "$latest_sha" ]]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping release PR update for stale master commit $SHA; current ${DEFAULT_BRANCH} is $latest_sha."
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust
+        if: steps.release_token.outputs.configured == 'true' && steps.current_master.outputs.stale == 'false'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run release-plz release-pr
-        if: steps.release_token.outputs.configured == 'true'
+        if: steps.release_token.outputs.configured == 'true' && steps.current_master.outputs.stale == 'false'
         id: release-plz
         uses: release-plz/action@v0.5
         env:
@@ -163,7 +186,7 @@ jobs:
           command: release-pr
 
       - name: Enable release PR auto-merge
-        if: steps.release_token.outputs.configured == 'true'
+        if: steps.release_token.outputs.configured == 'true' && steps.current_master.outputs.stale == 'false'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
           PR_JSON: ${{ steps.release-plz.outputs.pr }}
