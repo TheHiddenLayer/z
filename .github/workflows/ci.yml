@@ -151,7 +151,7 @@ jobs:
 
   release:
     name: Release binary (${{ matrix.os }})
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - fmt
       - clippy
@@ -222,6 +222,39 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  publish-release:
+    name: Publish GitHub release assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+          fi
+
+          gh release upload "$TAG" dist/* --clobber
+
   ci-success:
     name: CI success
     if: always()
@@ -233,6 +266,7 @@ jobs:
       - audit
       - test
       - release
+      - publish-release
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
