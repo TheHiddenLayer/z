@@ -209,6 +209,18 @@ fn render_remote_status(message: &str, area: Rect, buf: &mut Buffer) {
     Paragraph::new(Span::styled(message.to_string(), Style::default().fg(DIM))).render(area, buf);
 }
 
+fn branch_list_label(branch_mode: &BranchMode) -> &'static str {
+    match branch_mode {
+        BranchMode::New => "Base",
+        BranchMode::Existing => "Branch",
+    }
+}
+
+fn list_highlight_style(focused: bool) -> Style {
+    let color = if focused { TEXT } else { DIM };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
 fn issue_items(issues: &RemoteList<GitlabIssue>, query: &str) -> ListPayload {
     match issues {
         RemoteList::Idle | RemoteList::Loading => {
@@ -413,11 +425,19 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             .render(search_inner, buf);
     }
 
-    let (_l, list_value) = split_row(list_area);
+    let (list_label, list_value) = split_row(list_area);
     let list_focused = matches!(
         state.focus,
         NewAgentFocus::SourceList | NewAgentFocus::BranchList
     );
+    if matches!(state.source, NewAgentSource::Branch) {
+        render_label(
+            branch_list_label(&state.branch_mode),
+            list_focused,
+            list_label,
+            buf,
+        );
+    }
     let list_inner = render_focus_frame(list_focused, list_value, buf);
     let payload = match state.source {
         NewAgentSource::Issue => issue_items(&state.issues, &state.source_query),
@@ -435,7 +455,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
             let items: Vec<ListItem> = labels.into_iter().map(ListItem::new).collect();
             let list = List::new(items)
                 .style(Style::default().fg(DIM))
-                .highlight_style(Style::default().fg(TEXT).add_modifier(Modifier::BOLD));
+                .highlight_style(list_highlight_style(list_focused));
             let mut state = ListState::default().with_selected(selected_pos);
             StatefulWidget::render(list, list_inner, buf, &mut state);
         }
@@ -703,6 +723,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn new_branch_list_is_labeled_base() {
+        let app = wizard_app();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        NewAgentPanelWidget::new(&app).render(area, &mut buf);
+
+        assert!(
+            row_contains(&buf, "Base").is_some(),
+            "new branch base picker should be labeled Base"
+        );
+    }
+
+    #[test]
+    fn selected_list_item_is_dim_when_list_is_not_focused() {
+        let app = wizard_app();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        NewAgentPanelWidget::new(&app).render(area, &mut buf);
+
+        let (x, y) = cell_starting_text(&buf, "main").expect("selected branch missing");
+        let cell = &buf[(x, y)];
+        assert_eq!(cell.fg, DIM);
+        assert!(cell.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn selected_list_item_is_text_bold_when_list_is_focused() {
+        let mut app = wizard_app();
+        wizard_state_mut(&mut app).focus = NewAgentFocus::BranchList;
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        NewAgentPanelWidget::new(&app).render(area, &mut buf);
+
+        let (x, y) = cell_starting_text(&buf, "main").expect("selected branch missing");
+        let cell = &buf[(x, y)];
+        assert_eq!(cell.fg, TEXT);
+        assert!(cell.modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(LABEL_W, y)].symbol(), "\u{2502}");
+    }
+
     /// Build a minimal `App` whose `mode` is `Mode::NewAgent(_)`.
     ///
     /// Mirrors `app::tests::test_app_in_new_agent_mode`, but kept self-contained
@@ -742,6 +803,44 @@ mod tests {
         let mut buf = Buffer::empty(area);
         NewAgentPanelWidget::new(&app).render(area, &mut buf);
         buf
+    }
+
+    fn row_contains(buf: &Buffer, needle: &str) -> Option<u16> {
+        let area = *buf.area();
+        for y in area.top()..area.bottom() {
+            let mut line = String::new();
+            for x in area.left()..area.right() {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            if line.contains(needle) {
+                return Some(y);
+            }
+        }
+        None
+    }
+
+    fn cell_starting_text(buf: &Buffer, needle: &str) -> Option<(u16, u16)> {
+        let area = *buf.area();
+        let chars: Vec<char> = needle.chars().collect();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let mut matched = true;
+                for (offset, expected) in chars.iter().enumerate() {
+                    let Some(cell_x) = x.checked_add(offset as u16) else {
+                        matched = false;
+                        break;
+                    };
+                    if cell_x >= area.right() || !buf[(cell_x, y)].symbol().starts_with(*expected) {
+                        matched = false;
+                        break;
+                    }
+                }
+                if matched {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
     }
 
     fn cells_outside_columns(
