@@ -7,7 +7,7 @@ pub use crate::wizard::{
     Source as NewAgentSource, generate_branch_name,
 };
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn chrono_free_date_str() -> String {
@@ -233,6 +233,26 @@ fn mr_selection_is_visible(
     }
 }
 
+fn push_picker_effect_commands(
+    cmds: &mut Vec<Command>,
+    repos: &[PathBuf],
+    repo_index: usize,
+    effects: crate::wizard::PickerEffects,
+) {
+    let Some(repo) = repos.get(repo_index) else {
+        return;
+    };
+    if effects.reload_branches {
+        cmds.push(Command::LoadBranches(repo.clone()));
+    }
+    if effects.load_issues {
+        cmds.push(Command::LoadGitlabIssues(repo.clone()));
+    }
+    if effects.load_mrs {
+        cmds.push(Command::LoadGitlabMrs(repo.clone()));
+    }
+}
+
 // --- Command enum: side effects returned by update() ---
 
 #[derive(Debug)]
@@ -327,6 +347,13 @@ fn find_main_branch(branches: &[String]) -> usize {
         .unwrap_or(0)
 }
 
+fn repo_basename(repo: &Path) -> String {
+    repo.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 // --- App ---
 
 pub struct App {
@@ -377,6 +404,37 @@ impl App {
             pending_lifecycle_worktrees: HashSet::new(),
             focused: true,
         }
+    }
+
+    fn push_optimistic_agent(
+        &mut self,
+        repo: &Path,
+        branch: &str,
+        base_branch: Option<String>,
+        agent_name: &str,
+    ) -> String {
+        let repo_name = repo_basename(repo);
+        let session_name = agent::session_name(&repo_name, branch);
+        let agent = Agent {
+            repo_path: repo.to_path_buf(),
+            repo_name,
+            branch: branch.to_string(),
+            base_branch,
+            worktree_path: PathBuf::new(),
+            slug: branch.replace('/', "-"),
+            session_name: session_name.clone(),
+            status: AgentStatus::Creating,
+            agent_name: agent_name.to_string(),
+            last_pane_hash: None,
+            last_attached_count: None,
+            quiet_captures: 0,
+            seen_activity_since_seed: false,
+            was_spinner_visible: false,
+            consecutive_emits: 0,
+        };
+
+        self.agents.push(agent);
+        session_name
     }
 
     fn should_notify(&self) -> bool {
@@ -711,21 +769,7 @@ impl App {
                     }
                     let today = chrono_free_date_str();
                     let effects = state.move_picker(Direction::Next, repo_count, &today);
-                    if effects.reload_branches
-                        && let Some(repo) = repos.get(state.repo_index)
-                    {
-                        cmds.push(Command::LoadBranches(repo.clone()));
-                    }
-                    if effects.load_issues
-                        && let Some(repo) = repos.get(state.repo_index)
-                    {
-                        cmds.push(Command::LoadGitlabIssues(repo.clone()));
-                    }
-                    if effects.load_mrs
-                        && let Some(repo) = repos.get(state.repo_index)
-                    {
-                        cmds.push(Command::LoadGitlabMrs(repo.clone()));
-                    }
+                    push_picker_effect_commands(&mut cmds, &repos, state.repo_index, effects);
                 }
             }
             Action::PickerPrev => {
@@ -737,21 +781,7 @@ impl App {
                     }
                     let today = chrono_free_date_str();
                     let effects = state.move_picker(Direction::Prev, repo_count, &today);
-                    if effects.reload_branches
-                        && let Some(repo) = repos.get(state.repo_index)
-                    {
-                        cmds.push(Command::LoadBranches(repo.clone()));
-                    }
-                    if effects.load_issues
-                        && let Some(repo) = repos.get(state.repo_index)
-                    {
-                        cmds.push(Command::LoadGitlabIssues(repo.clone()));
-                    }
-                    if effects.load_mrs
-                        && let Some(repo) = repos.get(state.repo_index)
-                    {
-                        cmds.push(Command::LoadGitlabMrs(repo.clone()));
-                    }
+                    push_picker_effect_commands(&mut cmds, &repos, state.repo_index, effects);
                 }
             }
             Action::PickerConfirm => {
@@ -911,35 +941,16 @@ impl App {
                             prompt,
                             agent_name,
                         } => {
-                            let repo_name = repo
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            let sess_name = agent::session_name(&repo_name, &branch);
-                            let slug = branch.replace('/', "-");
                             let fresh_cmd = self
                                 .config
                                 .fresh(&agent_name, prompt.as_deref())
                                 .expect("wizard agent_name is always in config");
-
-                            self.agents.push(Agent {
-                                repo_path: repo.clone(),
-                                repo_name,
-                                branch: branch.clone(),
-                                base_branch: base_branch.clone(),
-                                worktree_path: PathBuf::new(),
-                                slug,
-                                session_name: sess_name.clone(),
-                                status: AgentStatus::Creating,
-                                agent_name: agent_name.clone(),
-                                last_pane_hash: None,
-                                last_attached_count: None,
-                                quiet_captures: 0,
-                                seen_activity_since_seed: false,
-                                was_spinner_visible: false,
-                                consecutive_emits: 0,
-                            });
+                            let sess_name = self.push_optimistic_agent(
+                                &repo,
+                                &branch,
+                                base_branch.clone(),
+                                &agent_name,
+                            );
 
                             cmds.push(Command::CreateAgent {
                                 repo,
@@ -958,35 +969,12 @@ impl App {
                             prompt,
                             agent_name,
                         } => {
-                            let repo_name = repo
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            let sess_name = agent::session_name(&repo_name, &branch);
-                            let slug = branch.replace('/', "-");
                             let fresh_cmd = self
                                 .config
                                 .fresh(&agent_name, prompt.as_deref())
                                 .expect("wizard agent_name is always in config");
-
-                            self.agents.push(Agent {
-                                repo_path: repo.clone(),
-                                repo_name,
-                                branch: branch.clone(),
-                                base_branch: None,
-                                worktree_path: PathBuf::new(),
-                                slug,
-                                session_name: sess_name.clone(),
-                                status: AgentStatus::Creating,
-                                agent_name: agent_name.clone(),
-                                last_pane_hash: None,
-                                last_attached_count: None,
-                                quiet_captures: 0,
-                                seen_activity_since_seed: false,
-                                was_spinner_visible: false,
-                                consecutive_emits: 0,
-                            });
+                            let sess_name =
+                                self.push_optimistic_agent(&repo, &branch, None, &agent_name);
 
                             cmds.push(Command::PrepareGitlabMrBranch {
                                 repo,

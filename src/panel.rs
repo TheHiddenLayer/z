@@ -1,7 +1,7 @@
 use crate::app::{App, BranchMode, Mode, NewAgentFocus, NewAgentSource, RemoteList};
 use crate::gitlab::{GitlabIssue, GitlabMergeRequest};
 use crate::picker::{filtered_issue_indices, filtered_mr_indices, issue_label, mr_label};
-use crate::style::{DIM, TEXT, footer_hint};
+use crate::style::{DIM, TEXT, footer_hint, truncate_end, truncate_middle, wrapped_line_count};
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Flex, Layout, Rect},
@@ -65,69 +65,6 @@ fn prompt_summary(prompt: &str, max_width: u16) -> String {
         "optional prompt"
     };
     truncate_end(summary, max_width as usize)
-}
-
-fn text_width(s: &str) -> usize {
-    Span::raw(s).width()
-}
-
-fn take_prefix_width(s: &str, max_width: usize) -> String {
-    let mut out = String::new();
-    for ch in s.chars() {
-        let mut next = out.clone();
-        next.push(ch);
-        if text_width(&next) > max_width {
-            break;
-        }
-        out = next;
-    }
-    out
-}
-
-fn take_suffix_width(s: &str, max_width: usize) -> String {
-    let mut out = String::new();
-    for ch in s.chars().rev() {
-        let mut next = String::new();
-        next.push(ch);
-        next.push_str(&out);
-        if text_width(&next) > max_width {
-            break;
-        }
-        out = next;
-    }
-    out
-}
-
-fn truncate_end(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if text_width(s) <= max_width {
-        return s.to_string();
-    }
-    if max_width <= 3 {
-        return ".".repeat(max_width);
-    }
-    let prefix = take_prefix_width(s, max_width - 3);
-    format!("{prefix}...")
-}
-
-fn truncate_middle(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    if text_width(s) <= max_width {
-        return s.to_string();
-    }
-    if max_width <= 3 {
-        return ".".repeat(max_width);
-    }
-    let available = max_width - 3;
-    let prefix_width = available / 2 + available % 2;
-    let suffix_width = available / 2;
-    let prefix = take_prefix_width(s, prefix_width);
-    let suffix = take_suffix_width(s, suffix_width);
-    format!("{prefix}...{suffix}")
 }
 
 fn split_row(row: Rect) -> (Rect, Rect) {
@@ -499,17 +436,7 @@ fn render_new_agent_panel(app: &App, area: Rect, buf: &mut Buffer) {
         Paragraph::new(Span::styled(summary, Style::default().fg(DIM))).render(body_inner, buf);
     } else {
         let text = state.prompt.as_str();
-        let width = body_inner.width.max(1) as usize;
-        let line_count: u16 = text
-            .split('\n')
-            .map(|l| {
-                if l.is_empty() {
-                    1
-                } else {
-                    ((l.len() as u16).saturating_add(width as u16 - 1)) / width as u16
-                }
-            })
-            .sum();
+        let line_count = wrapped_line_count(text, body_inner.width);
         let scroll = line_count.saturating_sub(body_inner.height);
         Paragraph::new(text)
             .style(Style::default().fg(TEXT))

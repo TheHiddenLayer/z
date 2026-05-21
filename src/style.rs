@@ -60,6 +60,79 @@ pub fn modal_title(text: &str) -> Span<'static> {
     )
 }
 
+pub fn text_width(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+fn take_prefix_width(s: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in s.chars() {
+        let ch_width = text_width(&ch.to_string());
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
+}
+
+fn take_suffix_width(s: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in s.chars().rev() {
+        let ch_width = text_width(&ch.to_string());
+        if width + ch_width > max_width {
+            break;
+        }
+        out.insert(0, ch);
+        width += ch_width;
+    }
+    out
+}
+
+pub fn truncate_end(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if text_width(s) <= max_width {
+        return s.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let prefix = take_prefix_width(s, max_width - 3);
+    format!("{prefix}...")
+}
+
+pub fn truncate_middle(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if text_width(s) <= max_width {
+        return s.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let available = max_width - 3;
+    let prefix_width = available / 2 + available % 2;
+    let suffix_width = available / 2;
+    let prefix = take_prefix_width(s, prefix_width);
+    let suffix = take_suffix_width(s, suffix_width);
+    format!("{prefix}...{suffix}")
+}
+
+pub fn wrapped_line_count(text: &str, max_width: u16) -> u16 {
+    let width = max_width.max(1) as usize;
+    let count: usize = text
+        .split('\n')
+        .map(|line| text_width(line).max(1).div_ceil(width))
+        .sum();
+    count.min(u16::MAX as usize) as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +233,26 @@ mod tests {
             span.style,
             Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
         );
+    }
+
+    #[test]
+    fn truncate_end_respects_visual_width() {
+        assert_eq!(truncate_end("abcdef", 4), "a...");
+        assert_eq!(truncate_end("界abcdef", 5), "界...");
+        assert_eq!(truncate_end("abcdef", 2), "..");
+    }
+
+    #[test]
+    fn truncate_middle_keeps_both_ends() {
+        assert_eq!(truncate_middle("feature/render-table", 12), "featu...able");
+        assert_eq!(truncate_middle("abcdef", 0), "");
+    }
+
+    #[test]
+    fn wrapped_line_count_uses_display_width() {
+        assert_eq!(wrapped_line_count("", 10), 1);
+        assert_eq!(wrapped_line_count("abcd", 2), 2);
+        assert_eq!(wrapped_line_count("界界", 2), 2);
+        assert_eq!(wrapped_line_count("a\nbc", 10), 2);
     }
 }

@@ -15,7 +15,13 @@ use ratatui::{
 
 use crate::agent::Agent;
 use crate::gitlab::MrDisplayKind;
-use crate::style::{DIM, TEXT, drift_arrow, status_color};
+use crate::style::{DIM, TEXT, drift_arrow, status_color, text_width, truncate_end};
+
+const MIN_BRANCH_WIDTH: u16 = 6;
+const MAX_BASE_WIDTH: u16 = 24;
+const MAX_REPO_WIDTH: u16 = 24;
+const COLUMN_COUNT: u16 = 6;
+const COLUMN_SPACING: u16 = 1;
 
 fn table_scroll_offset(selected: usize, visible_rows: usize) -> usize {
     if visible_rows == 0 {
@@ -77,24 +83,19 @@ impl Widget for &AgentTableWidget<'_> {
         let repo_w = self
             .agents
             .iter()
-            .map(|a| a.repo_name.len())
+            .map(|a| text_width(&a.repo_name))
             .max()
             .unwrap_or(0)
-            .max(4) as u16;
+            .max(4)
+            .min(MAX_REPO_WIDTH as usize) as u16;
 
-        let branch_w = self
+        let desired_branch_w = self
             .agents
             .iter()
-            .map(|a| {
-                if a.slug != a.branch.replace('/', "-") {
-                    a.slug.len() + 3 + a.branch.len()
-                } else {
-                    a.branch.len()
-                }
-            })
+            .map(branch_display_width)
             .max()
             .unwrap_or(0)
-            .max(6) as u16;
+            .max(MIN_BRANCH_WIDTH as usize) as u16;
 
         let has_base = self
             .agents
@@ -103,15 +104,21 @@ impl Widget for &AgentTableWidget<'_> {
         let base_col_w = if has_base {
             self.agents
                 .iter()
-                .map(|a| a.base_branch.as_deref().unwrap_or("").len())
+                .map(|a| text_width(a.base_branch.as_deref().unwrap_or("")))
                 .max()
                 .unwrap_or(0)
-                .max(4) as u16
+                .max(4)
+                .min(MAX_BASE_WIDTH as usize) as u16
         } else {
             0
         };
         let status_w: u16 = 1;
         let mr_w: u16 = 7;
+        let base_constraint_w = if base_col_w > 0 { base_col_w + 2 } else { 0 };
+        let spacing_w = COLUMN_SPACING * COLUMN_COUNT.saturating_sub(1);
+        let fixed_w = 1 + (status_w + 1) + (mr_w + 1) + base_constraint_w + repo_w + spacing_w;
+        let branch_budget = area.width.saturating_sub(fixed_w).saturating_sub(2);
+        let branch_w = desired_branch_w.min(branch_budget.max(MIN_BRANCH_WIDTH));
 
         let mut rows: Vec<Row> = Vec::new();
         for (i, agent) in self.agents.iter().enumerate() {
@@ -129,23 +136,14 @@ impl Widget for &AgentTableWidget<'_> {
             };
 
             let base_cell = match agent.base_branch.as_deref() {
-                Some(b) if !b.is_empty() => Line::from(Span::styled(b.to_string(), text_style)),
+                Some(b) if !b.is_empty() => Line::from(Span::styled(
+                    truncate_end(b, base_col_w as usize),
+                    text_style,
+                )),
                 _ => Line::from(""),
             };
 
-            let drifted = agent.slug != agent.branch.replace('/', "-");
-            let branch_cell = if drifted {
-                Line::from(vec![
-                    Span::styled(agent.slug.clone(), text_style),
-                    drift_arrow(),
-                    Span::styled(
-                        agent.branch.clone(),
-                        text_style.add_modifier(Modifier::ITALIC),
-                    ),
-                ])
-            } else {
-                Line::from(Span::styled(agent.branch.clone(), text_style))
-            };
+            let branch_cell = branch_line(agent, branch_w as usize, text_style);
 
             let mr_kind = self.mr_kinds.get(i).copied().unwrap_or(MrDisplayKind::None);
 
@@ -155,7 +153,10 @@ impl Widget for &AgentTableWidget<'_> {
                 Cell::from(Span::styled(mr_status_label(mr_kind), text_style)),
                 Cell::from(branch_cell),
                 Cell::from(base_cell),
-                Cell::from(Span::styled(agent.repo_name.clone(), text_style)),
+                Cell::from(Span::styled(
+                    truncate_end(&agent.repo_name, repo_w as usize),
+                    text_style,
+                )),
             ]));
         }
 
@@ -177,11 +178,12 @@ impl Widget for &AgentTableWidget<'_> {
                 Constraint::Length(status_w + 1),
                 Constraint::Length(mr_w + 1),
                 Constraint::Length(branch_w + 2),
-                Constraint::Length(if base_col_w > 0 { base_col_w + 2 } else { 0 }),
+                Constraint::Length(base_constraint_w),
                 Constraint::Min(repo_w),
             ],
         )
         .header(header)
+        .column_spacing(COLUMN_SPACING)
         .block(Block::default().borders(Borders::NONE));
 
         let mut table_state = TableState::default()
@@ -193,6 +195,62 @@ impl Widget for &AgentTableWidget<'_> {
 
 fn status_dot(agent: &Agent) -> Span<'static> {
     Span::styled("\u{25CF}", Style::default().fg(status_color(agent)))
+}
+
+fn branch_drifted(agent: &Agent) -> bool {
+    agent.slug != agent.branch.replace('/', "-")
+}
+
+fn branch_display_width(agent: &Agent) -> usize {
+    if branch_drifted(agent) {
+        text_width(&agent.slug) + text_width(" \u{2192} ") + text_width(&agent.branch)
+    } else {
+        text_width(&agent.branch)
+    }
+}
+
+fn branch_line(agent: &Agent, max_width: usize, text_style: Style) -> Line<'static> {
+    if !branch_drifted(agent) {
+        return Line::from(Span::styled(
+            truncate_end(&agent.branch, max_width),
+            text_style,
+        ));
+    }
+
+    if branch_display_width(agent) <= max_width {
+        return Line::from(vec![
+            Span::styled(agent.slug.clone(), text_style),
+            drift_arrow(),
+            Span::styled(
+                agent.branch.clone(),
+                text_style.add_modifier(Modifier::ITALIC),
+            ),
+        ]);
+    }
+
+    let arrow_width = text_width(" \u{2192} ");
+    if max_width <= arrow_width + 1 {
+        return Line::from(Span::styled(
+            truncate_end(
+                &format!("{} \u{2192} {}", agent.slug, agent.branch),
+                max_width,
+            ),
+            text_style,
+        ));
+    }
+
+    let available = max_width - arrow_width;
+    let slug_width = available / 2 + available % 2;
+    let branch_width = available / 2;
+
+    Line::from(vec![
+        Span::styled(truncate_end(&agent.slug, slug_width), text_style),
+        drift_arrow(),
+        Span::styled(
+            truncate_end(&agent.branch, branch_width),
+            text_style.add_modifier(Modifier::ITALIC),
+        ),
+    ])
 }
 
 fn mr_status_label(kind: MrDisplayKind) -> &'static str {
@@ -268,6 +326,25 @@ mod tests {
         let dump = buffer_to_string(&terminal);
         assert!(dump.contains("feature/x"), "branch missing in:\n{dump}");
         assert!(dump.contains("myrepo"), "repo missing in:\n{dump}");
+    }
+
+    #[test]
+    fn long_branch_is_truncated_before_it_eats_repo_column() {
+        let mut agent = make_agent_with_status(AgentStatus::Running);
+        agent.repo_name = "myrepo".into();
+        agent.branch = "feature/this-branch-name-is-way-too-long-for-the-bottom-table".into();
+        agent.slug = agent.branch.replace('/', "-");
+
+        let agents = vec![agent];
+        let widget = AgentTableWidget::new(&agents).selected(0);
+        let terminal = render_widget(&widget, 52, 6);
+        let dump = buffer_to_string(&terminal);
+
+        assert!(dump.contains("..."), "long branch should truncate:\n{dump}");
+        assert!(
+            dump.contains("myrepo"),
+            "repo column should stay visible:\n{dump}"
+        );
     }
 
     #[test]
