@@ -8,8 +8,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, List, ListItem, ListState, Padding, Paragraph, StatefulWidget,
-        Widget, Wrap,
+        Block, Borders, List, ListItem, ListState, Padding, Paragraph, StatefulWidget, Widget, Wrap,
     },
 };
 
@@ -137,7 +136,6 @@ fn tab_value_line(options: &[&str], selected: usize) -> Line<'static> {
 fn render_divider(area: Rect, buf: &mut Buffer) {
     Block::new()
         .borders(Borders::TOP)
-        .border_type(BorderType::LightTripleDashed)
         .border_style(Style::default().fg(DIM))
         .render(area, buf);
 }
@@ -868,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn two_group_dividers_render_light_triple_dashed_rules() {
+    fn two_group_dividers_render_solid_rules() {
         let app = wizard_app();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
@@ -879,14 +877,11 @@ mod tests {
             let row: String = (0..area.width)
                 .map(|x| buf[(x, y)].symbol().to_string())
                 .collect();
-            if row.chars().filter(|c| *c == '┄').count() >= (area.width as usize - 4) {
+            if row.chars().filter(|c| *c == '─').count() >= (area.width as usize - 4) {
                 divider_rows += 1;
             }
         }
-        assert_eq!(
-            divider_rows, 2,
-            "expected exactly two light triple dashed group dividers"
-        );
+        assert_eq!(divider_rows, 2, "expected exactly two solid group dividers");
     }
 
     #[test]
